@@ -82,14 +82,18 @@ proc decodeType(t: NimNode, stream: NimNode):
             kind: newIdentNode("string"),
             custom: nil
           )
-        of '*':
-          let customProc = newIdentNode(($t.ident)[1..^1])
-          return (size: BiggestInt(0), kind: (quote do:
-            type(`stream`.`customProc`())
-          ), custom: customProc)
         else:
           raise newException(AssertionError,
             "Format " & $t.ident & " not supported")
+    of nnkCall:
+      let customProc = newCall(t[0].ident, stream)
+      var i = 1
+      while i < t.len:
+        customProc.add(t[i])
+        inc i
+      return (size: BiggestInt(0), kind: (quote do:
+        type(`customProc`)
+      ), custom: customProc)
     else:
       raise newException(AssertionError,
         "Unknown kind: " & $t.kind)
@@ -131,7 +135,7 @@ proc createReadStatement(
     custom = info.custom
   if custom != nil:
     result = (quote do:
-      `field` = `stream`.`custom`()
+      `field` = `custom`
     )
   elif info.kind.kind == nnkIdent and $info.kind.ident == "string":
     if offset != 0:
@@ -182,12 +186,13 @@ proc createReadStatement(
     offset = offset mod 8
 
 
-macro createParser*(name: untyped, body:untyped): untyped =
+macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   ## The main macro in this module. It takes the ``name`` of the procedure to
   ## create along with a block on the format described above and creates a
   ## parser for it on the form ``proc <name>(Stream): tuple[<fields>]``
-  let res = newIdentNode("result")
   let
+    body = paramsAndDef[^1]
+    res = newIdentNode("result")
     stream = genSym(nskParam)
   var
     inner = newStmtList()
@@ -196,11 +201,38 @@ macro createParser*(name: untyped, body:untyped): untyped =
     field = 0
     offset: BiggestInt = 0
     seenFields = newSeq[string]()
+    extraParams = newSeq[NimNode]()
+  proc replace(node: var NimNode) =
+    if node.kind == nnkIdent:
+      if $node.ident in seenFields:
+        let oldField = node.ident
+        node = (quote do: `res`.`oldField`)
+        echo node.treeRepr
+    else:
+      var i = 0
+      while i < len(node):
+        var n = node[i]
+        n.replace()
+        node[i] = n
+        inc i
+  while i < paramsAndDef.len - 1:
+    let p = paramsAndDef[i]
+    if p.kind != nnkExprColonExpr:
+      raise newException(AssertionError, "Extra arguments must be colon expressions")
+    let s = parseStmt("proc hello(" & $p.toStrLit & ")")
+    extraParams.add(s[0][3][1])
+    inc i
+  i = 0
   while i < body.len:
     var
       def = body[i]
     if def.kind == nnkPrefix:
-      def = newCall(newIdentNode($def[0].ident & $def[1].ident), def[2])
+      var newDef1 = def[1]
+      if newDef1.kind != nnkCall:
+        newDef1 = newCall(newDef1)
+      newDef1.replace()
+      echo newDef1.treeRepr
+      def = newCall(newDef1, def[2])
     var
       info = decodeType(def[0], stream)
     let
@@ -273,18 +305,6 @@ macro createParser*(name: untyped, body:untyped): untyped =
         if def[1][0].len == 2:
           var
             fields = def[1][0][1]
-          proc replace(node: var NimNode) =
-            if node.kind == nnkIdent:
-              if $node.ident in seenFields:
-                let oldField = node.ident
-                node = (quote do: `res`.`oldField`)
-            else:
-              var i = 0
-              while i < len(node):
-                var n = node[i]
-                replace(n)
-                node[i] = n
-                inc i
           fields.replace()
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`](`fields`)
@@ -360,6 +380,8 @@ macro createParser*(name: untyped, body:untyped): untyped =
     proc `name`(`stream`: Stream) =
       `inner`
   result[3][0] = tupleMeat
+  for p in extraParams:
+    result[3].add p
 
   echo result.toStrLit
 
@@ -371,11 +393,10 @@ when isMainModule:
   createParser(myParser):
     u8: _ = 128
     u16: size
-    4: data[]
-    4: _ = 3
+    4: data[size*2]
     s: str[]
     s: _ = "9xC\0"
-    *list: inner
+    *list(size): inner
     u8: _ = 67
 
   block parse:
@@ -388,3 +409,15 @@ when isMainModule:
       echo data.str
       echo data.inner.size
       echo data.inner.data
+
+dumpTree:
+  createParser(myParser, size: int):
+    u8: _ = 128
+    u16: size
+    4: data[size]
+    4: _ = 3
+    s: str[]
+    s: _ = "9xC\0"
+    *list(size): inner
+    *list: inner
+    u8: _ = 67
