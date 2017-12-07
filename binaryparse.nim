@@ -1,6 +1,3 @@
-## binaryparse
-## ===========
-##
 ## This module implements a macro to create binary parsers. The parsers
 ## generated reads from a Stream and returns a tuple with each named field.
 ## The general format the macro takes is:
