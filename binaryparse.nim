@@ -41,6 +41,48 @@
 ## magic number and will be used to terminate the sequence. As count you can use
 ## the name of any previous field, literals, previously defined variables, or a
 ## combination.
+##
+## Another thing commonly found in binary formats are repeating blocks or
+## formats within the format. These can be read by using a custom parser.
+## Custom parsers technically supports any procedure that takes a Stream as the
+## first argument, however care must be taken to leave the Stream in the correct
+## position. You can also define the inner format with a parser from this module
+## and then pass that parser to the outer parser. This means that you can easily
+## nest parsers. If you need values from the outer parser you can add parameters
+## to the inner parser by giving it colon expressions before the body (e.g the
+## call ``createParser(list, size: uint16)`` would create a parser
+## ``proc list(stream: Stream, size: uint16): <return type>``). To call a parser
+## use the ``*`` type as described above and give it the name of the parser and
+## any optional arguments. The stream object will get added automatically as the
+## first parameter.
+##
+## Example:
+## In lieu of proper examples the binaryparse.nim file contains a ``when
+## isMainModule()`` block showcasing how it can be used. The table below
+## describes that block in a bit more detail:
+## ======================= =====================================================
+## Format                  Description
+## ----------------------- -----------------------------------------------------
+## ``u8: _ = 128``         Reads an unsigned 8-bit integer and checks if it
+##                         equals 128 without storing the value as a field in
+##                         returned tuple
+## ``u16: size``           Reads an unsigned 16-bit integer and names it
+##                         ``size`` in the returned tuple
+## ``4: data[size*2]``     Reads a sequence of 4-bit integers into a ``data``
+##                         field in the returned tuple. Size is the value read
+##                         above, and denotes the count of integers to read.
+## ``s: str[]``            Reads null terminated strings into a ``str`` field in
+##                         the returned tuple. Since it's given empty brackets
+##                         the next field needs to be a magic field and the
+##                         sequence will be read until the magic is found.
+## ``s: _ = "9xC\0"``      Reads a non-null terminated string and checks if it
+##                         equals the magic sequence.
+## ``*list(size): inner``  Uses a pre-defined procedure ``list`` which is called
+##                         with the current Stream and the ``size`` read
+##                         earlier. Stores the return value in a field ``inner``
+##                         in the returned tuple.
+## ``u8: _ = 67``          Reads an unsigned 8-bit integer and checks if it
+##                         equals 67 without storing the value.
 
 import macros
 import streams
@@ -51,7 +93,24 @@ type
     ## Error raised from the parser procedure when a magic sequence is not
     ## matching the specified value.
 
-proc decodeType(t: NimNode, stream: NimNode):
+macro typeGetter*(body: typed): untyped =
+  ## Helper macro to get the return type of custom parsers
+  body.getTypeImpl[0][0]
+
+proc replace(node: var NimNode, seenFields: seq[string]) =
+  if node.kind == nnkIdent:
+    if $node.ident in seenFields:
+      node = newDotExpr(newIdentNode("result"), node)
+  else:
+    var i = 0
+    while i < len(node):
+      var n = node[i]
+      n.replace(seenFields)
+      node[i] = n
+      inc i
+
+
+proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
   tuple[size: BiggestInt, kind: NimNode, custom: NimNode] =
   var
     size: BiggestInt
@@ -86,14 +145,17 @@ proc decodeType(t: NimNode, stream: NimNode):
           raise newException(AssertionError,
             "Format " & $t.ident & " not supported")
     of nnkCall:
-      let customProc = newCall(t[0].ident, stream)
-      var i = 1
+      var
+        t0 = t[0]
+        customProc = newCall(t[0].ident, stream)
+        retType = quote do:
+          typeGetter(`t0`)
+        i = 1
       while i < t.len:
         customProc.add(t[i])
         inc i
-      return (size: BiggestInt(0), kind: (quote do:
-        type(`customProc`)
-      ), custom: customProc)
+      customProc.replace(seenFields)
+      return (size: BiggestInt(0), kind: retType, custom: customProc)
     else:
       raise newException(AssertionError,
         "Unknown kind: " & $t.kind)
@@ -117,6 +179,7 @@ proc decodeType(t: NimNode, stream: NimNode):
     kind: newIdentNode(kindPrefix & $containSize),
     custom: custom
   )
+
 
 proc getBitInfo(size, offset: BiggestInt):
   tuple[read, skip, shift , mask: BiggestInt] =
@@ -202,23 +265,11 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     offset: BiggestInt = 0
     seenFields = newSeq[string]()
     extraParams = newSeq[NimNode]()
-  proc replace(node: var NimNode) =
-    if node.kind == nnkIdent:
-      if $node.ident in seenFields:
-        let oldField = node.ident
-        node = (quote do: `res`.`oldField`)
-        echo node.treeRepr
-    else:
-      var i = 0
-      while i < len(node):
-        var n = node[i]
-        n.replace()
-        node[i] = n
-        inc i
   while i < paramsAndDef.len - 1:
     let p = paramsAndDef[i]
     if p.kind != nnkExprColonExpr:
-      raise newException(AssertionError, "Extra arguments must be colon expressions")
+      raise newException(AssertionError,
+        "Extra arguments must be colon expressions")
     let s = parseStmt("proc hello(" & $p.toStrLit & ")")
     extraParams.add(s[0][3][1])
     inc i
@@ -227,14 +278,12 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     var
       def = body[i]
     if def.kind == nnkPrefix:
-      var newDef1 = def[1]
-      if newDef1.kind != nnkCall:
-        newDef1 = newCall(newDef1)
-      newDef1.replace()
-      echo newDef1.treeRepr
-      def = newCall(newDef1, def[2])
+      if def[1].kind != nnkCall:
+        def = newCall(newCall(def[1]), def[2])
+      else:
+        def = newCall(def[1], def[2])
     var
-      info = decodeType(def[0], stream)
+      info = decodeType(def[0], stream, seenFields)
     let
       size = info.size
       kind = info.kind
@@ -305,7 +354,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         if def[1][0].len == 2:
           var
             fields = def[1][0][1]
-          fields.replace()
+          fields.replace(seenFields)
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`](`fields`)
             for `ii` in 0..<(`fields`).int:
@@ -317,7 +366,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
             raise newException(AssertionError,
               "Open arrays must be followed by magic for termination")
           let
-            endInfo = decodeType(endMagic[0], stream)
+            endInfo = decodeType(endMagic[0], stream, seenFields)
             magic = endMagic[1][0][1]
             endKind = endInfo.kind
             peek = newIdentNode("peek" & $endInfo.kind)
@@ -377,17 +426,16 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     inc i
     inc field
   result = quote do:
-    proc `name`(`stream`: Stream) =
+    proc `name`(`stream`: Stream): `tupleMeat` =
       `inner`
-  result[3][0] = tupleMeat
   for p in extraParams:
     result[3].add p
 
   echo result.toStrLit
 
 when isMainModule:
-  createParser(list):
-    u8: size
+  createParser(list, size: uint16):
+    u8: _
     u8: data[size]
 
   createParser(myParser):
@@ -407,17 +455,4 @@ when isMainModule:
       echo data.size
       echo data.data
       echo data.str
-      echo data.inner.size
       echo data.inner.data
-
-dumpTree:
-  createParser(myParser, size: int):
-    u8: _ = 128
-    u16: size
-    4: data[size]
-    4: _ = 3
-    s: str[]
-    s: _ = "9xC\0"
-    *list(size): inner
-    *list: inner
-    u8: _ = 67
