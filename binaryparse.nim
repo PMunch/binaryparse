@@ -6,6 +6,7 @@
 ##
 ## Where optional fields are in [] brackets and required fields are in <>
 ## brackets. Each field has separate meanings, as described in the table below:
+##
 ## ========== ==================================================================
 ## Name       Description
 ## ---------- ------------------------------------------------------------------
@@ -60,6 +61,7 @@
 ## In lieu of proper examples the binaryparse.nim file contains a ``when
 ## isMainModule()`` block showcasing how it can be used. The table below
 ## describes that block in a bit more detail:
+##
 ## ======================= =====================================================
 ## Format                  Description
 ## ----------------------- -----------------------------------------------------
@@ -83,6 +85,7 @@
 ##                         in the returned tuple.
 ## ``u8: _ = 67``          Reads an unsigned 8-bit integer and checks if it
 ##                         equals 67 without storing the value.
+## ======================= =====================================================
 
 import macros
 import streams

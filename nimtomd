@@ -1,0 +1,1 @@
+pandoc <(cat binaryparse.nim | grep "^##" | sed 's/^##\( \)\?//') -f rst+simple_tables -t markdown_github -o README.md
