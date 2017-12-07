@@ -33,7 +33,7 @@ options    These will change the regular behaviour of reading into a field.
 
 Many binary formats include special "magic" sequences to identify the file
 or regions within it. The option ``= <value>`` can be used to check if a
-field has a certain value. If the value doesn't match a MagicError_ is
+field has a certain value. If the value doesn't match a MagicError is
 raised. Value must match the value of the field it checks. When the field is
 a string type the exact length of the magic string is read, to include a
 terminating NULL byte use ``\0`` in the string literal.
