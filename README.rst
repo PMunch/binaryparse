@@ -12,8 +12,8 @@ brackets. Each field has separate meanings, as described in the table below:
 ========== ==================================================================
 Name       Description
 ---------- ------------------------------------------------------------------
-type       This is the type of value found in this field, if no tpe is
-           specified then it will be parsed as an integer. Supperted types
+type       This is the type of value found in this field, if no type is
+           specified then it will be parsed as an integer. Supported types
            are ``u`` to get unsigned integers, ``f`` for floating point,
            ``s`` for strings, and ``*`` for custom parser.
 size       The size, in *bits*, of the field to read. For uint and int values
