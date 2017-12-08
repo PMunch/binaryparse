@@ -90,11 +90,14 @@
 import macros
 import streams
 import strutils
+import sequtils
+import sets
 
 type
   MagicError* = object of Exception
     ## Error raised from the parser procedure when a magic sequence is not
     ## matching the specified value.
+  GeneratorError* = object of Exception
 
 macro typeGetter*(body: typed): untyped =
   ## Helper macro to get the return type of custom parsers
@@ -434,7 +437,92 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   for p in extraParams:
     result[3].add p
 
-  echo result.toStrLit
+  # echo result.toStrLit
+
+
+# 0
+
+proc generateBinary*(value: int, size: int): seq[byte] =
+  result = @[]
+  if size notin {8, 16, 32, 64}:
+    raise newException(GeneratorError, "$1 incorrect int size" % $size)
+  for z in 0..<size div 8:
+    result.add(((value shr (8 * z)) and 0xFF).byte)
+
+proc generateBinary*(value: string): seq[byte] =
+  # for now I just assume it's ascii
+  result = cstring(value).mapIt(byte(it))
+
+proc generateBinary*(value: seq[byte], size: int): seq[byte] =
+  result = value[0..(size div 8) - 1]
+
+proc generateBinary*(value: string, size: int): seq[byte] =
+  result = cstring(value).mapIt(byte(it))[0..(size div 8) - 1]
+
+proc getVariant(field: NimNode): HashSet[string] =
+  result = initSet[string]()
+  for branch in field:
+    case branch.kind:
+    of nnkSym:
+      result.incl(repr(branch))
+    of nnkOfBranch, nnkElse:
+      for child in branch[^1]:
+        expectKind(child, nnkSym)
+        result.incl(repr(child))
+    else:
+      error("huh unexpected")
+
+proc getFields(t: NimNode): HashSet[string] =
+  var candidate = t.getType()[1].getType()
+  result = initSet[string]()
+  while candidate.kind == nnkBracketExpr and candidate[0].kind == nnkSym and repr(candidate[0]) == "ref":
+    candidate = candidate[1].getType()
+  if candidate.kind != nnkObjectTy:
+    error("fix generator")
+  let recList = candidate[2]
+  for field in recList:
+    case field.kind:
+    of nnkSym:
+      result.incl(repr(field))
+    of nnkRecCase:
+      result.incl(getVariant(field))
+    else:
+      error("huh bizarre")
+
+proc replaceFields(node: NimNode, this: NimNode, fields: HashSet[string]): NimNode =
+  case node.kind:
+  of nnkSym, nnkIdent:
+    if repr(node) in fields:
+      result = nnkDotExpr.newTree(this, ident(repr(node)))
+    else:
+      result = node
+  of nnkCharLit..nnkUInt64Lit, nnkFloatLit..nnkFloat128Lit, nnkStrLit..nnkTripleStrLit:
+    result = node
+  else:
+    result = node.kind.newTree(node.mapIt(replaceFields(it, this, fields)))
+
+macro createGenerator(t: typed, s: untyped): untyped =
+  var value = ident("result")
+  var fields = getFields(t)
+  var this = ident("s")
+  result = quote:
+    proc generateBinary*(`this`: `t`): seq[byte] =
+      `value` = @[]
+
+  for node in s:
+    var call: NimNode
+    if node.kind == nnkCall:
+      assert len(node) == 2
+      var arg = replaceFields(node[1], this, fields)
+      call = nnkCall.newTree(ident("generateBinary"), arg, node[0])
+    else:
+      var arg = replaceFields(node, this, fields)
+      call = nnkCall.newTree(ident("generateBinary"), arg)
+    var q = quote:
+      `value` = `value`.concat(`call`)
+    result[^1].add(q)
+
+  # echo repr(result)
 
 when isMainModule:
   createParser(list, size: uint16):
@@ -459,3 +547,39 @@ when isMainModule:
       echo data.data
       echo data.str
       echo data.inner.data
+
+  type
+    W = enum Handshake, Ltep, Port, RequestOrCancel, Piece, Bitfield, Have, NotInterested, Interested, Unchoke, Choke, KeepAlive
+
+    Wire = ref object
+      case kind: W
+      of W.Handshake:
+        extensions: seq[byte]
+        infoHash: string
+        peerID: int
+      else:
+        discard
+
+    Wire2 = object
+      s*: int
+      wire*: Wire
+
+  createGenerator(Wire):
+    8: 19
+    "BitTorrent protocol"
+    64: extensions
+    160: infoHash
+
+
+  createGenerator(Wire2):
+    8: s
+    wire
+
+  block gen:
+    var wire = Wire(kind: W.Handshake, extensions: cast[seq[byte]](@[0, 0, 0, 0, 0, 0, 0, 0]), infoHash: "eeeeeeeeeeeeeeeeeeee")
+    var s = generateBinary(wire)
+    echo s
+    var wire2 = Wire2(s: 2, wire: wire)
+    var s2 = generateBinary(wire2)
+    echo s2
+
