@@ -252,6 +252,64 @@ proc createReadStatement(
     offset = offset mod 8
 
 
+proc createWriteStatement(
+  field: NimNode,
+  info: tuple[size: BiggestInt, kind: NimNode, custom: NimNode],
+  offset: var BiggestInt, stream: NimNode): NimNode {.compileTime.} =
+  let
+    size = info.size
+    kind = info.kind
+    custom = info.custom
+  if custom != nil:
+    result = (quote do:
+      raise newException(AssertionError, "Custom writers not implemented")
+    )
+  elif info.kind.kind == nnkIdent and $info.kind.ident == "string":
+    if offset != 0:
+      raise newException(AssertionError, "Strings must be on byte boundry")
+    if size == 0:
+      result = (quote do:
+        `stream`.write(`field`)
+      )
+    else:
+      result = (quote do:
+        if `size` != `field`.len:
+          raise newException(AssertionError, "String of given size not matching")
+        `stream`.write(`field`)
+      )
+  else:
+    let
+      bitInfo = getBitInfo(size, offset)
+      write = bitInfo.read
+      skip = bitInfo.skip
+      shift = bitInfo.shift
+      mask = bitInfo.mask
+    result = newStmtList()
+    if write == skip:
+      result.add(quote do:
+        if `stream`.writeData(`field`.addr, `write`) != `write`:
+          raise newException(IOError,
+            "Unable to write the requested amount of bytes from file")
+      )
+    else:
+      result.add(quote do:
+        var tmp: `kind`
+        if `stream`.peekData(tmp.addr, `write`) != `write`:
+          raise newException(IOError,
+            "Unable to write the requested amount of bytes from file")
+        tmp = tmp or (`field` shr `shift`) and `mask`
+        if `stream`.writeData(tmp.addr, `write`) != `write`:
+          raise newException(IOError,
+            "Unable to write the requested amount of bytes from file")
+      )
+    if skip != 0 and skip != write:
+      result.add(quote do:
+        `stream`.setPosition(`stream`.getPosition() - (`write` - `skip`))
+      )
+    offset += size
+    offset = offset mod 8
+
+
 macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   ## The main macro in this module. It takes the ``name`` of the procedure to
   ## create along with a block on the format described above and creates a
@@ -262,6 +320,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     stream = genSym(nskParam)
   var
     inner = newStmtList()
+    writer = newStmtList()
     tupleMeat = nnkTupleTy.newNimNode
     i = 0
     field = 0
@@ -299,6 +358,9 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           inner.add(quote do:
             var `sym`: `kind`
           )
+          writer.add(quote do:
+            var `sym`: `kind` = `magic`
+          )
           dec field
         else:
           sym = (quote do: `res`[`field`])
@@ -309,6 +371,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         if $info.kind == "string":
           info.size = ($magic).len
         inner.add(createReadStatement(sym, info, offset, stream))
+        writer.add(createWriteStatement(sym, info, offset, stream))
         inner.add(quote do:
           if `sym` != `magic`:
             raise newException(MagicError,
@@ -424,6 +487,11 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
               (quote do: `res`[`field`]), info, offset, stream
             )
           )
+          writer.add(
+            createWriteStatement(
+              (quote do: `res`[`field`]), info, offset, stream
+            )
+          )
       else:
         discard
     inc i
@@ -435,6 +503,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     result[3].add p
 
   echo result.toStrLit
+  echo writer.toStrLit
 
 when isMainModule:
   createParser(list, size: uint16):
