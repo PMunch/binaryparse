@@ -98,7 +98,7 @@ type
 
 macro typeGetter*(body: typed): untyped =
   ## Helper macro to get the return type of custom parsers
-  body.getTypeImpl[0][0]
+  body.getTypeImpl[0][1][0][0]
 
 proc replace(node: var NimNode, seenFields: seq[string]) =
   if node.kind == nnkIdent:
@@ -114,11 +114,11 @@ proc replace(node: var NimNode, seenFields: seq[string]) =
 
 
 proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
-  tuple[size: BiggestInt, kind: NimNode, custom: NimNode] =
+  tuple[size: BiggestInt, kind, customReader, customWriter: NimNode] =
   var
     size: BiggestInt
     kindPrefix: string
-    custom: NimNode
+    customReader, customWriter: NimNode
   case t.kind:
     of nnkIntLit:
       size = t.intVal
@@ -142,7 +142,8 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
           return (
             size: BiggestInt(size),
             kind: newIdentNode("string"),
-            custom: nil
+            customReader: nil,
+            customWriter: nil
           )
         else:
           raise newException(AssertionError,
@@ -150,15 +151,17 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
     of nnkCall:
       var
         t0 = t[0]
-        customProc = newCall(t[0].ident, stream)
+        customProcRead = newCall(nnkDotExpr.newTree(t[0], newIdentNode("read")), stream)
+        customProcWrite = newCall(nnkDotExpr.newTree(t[0], newIdentNode("writes")), stream)
         retType = quote do:
           typeGetter(`t0`)
         i = 1
       while i < t.len:
-        customProc.add(t[i])
+        customProcRead.add(t[i])
         inc i
-      customProc.replace(seenFields)
-      return (size: BiggestInt(0), kind: retType, custom: customProc)
+      customProcRead.replace(seenFields)
+      echo t.treeRepr
+      return (size: BiggestInt(0), kind: retType, customReader: customProcRead, customWriter: customProcWrite)
     else:
       raise newException(AssertionError,
         "Unknown kind: " & $t.kind)
@@ -180,7 +183,8 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
   return (
     size: size,
     kind: newIdentNode(kindPrefix & $containSize),
-    custom: custom
+    customReader: customReader,
+    customWriter: customWriter
   )
 
 
@@ -194,11 +198,11 @@ proc getBitInfo(size, offset: BiggestInt):
 
 proc createReadStatement(
   field: NimNode,
-  info: tuple[size: BiggestInt, kind: NimNode, custom: NimNode],
+  info: tuple[size: BiggestInt, kind, customReader, customWriter: NimNode],
   offset: var BiggestInt, stream: NimNode): NimNode {.compileTime.} =
   let
     size = info.size
-    custom = info.custom
+    custom = info.customReader
   if custom != nil:
     result = (quote do:
       `field` = `custom`
@@ -221,18 +225,22 @@ proc createReadStatement(
         `field` = $`stream`.readStr(`size`)
       )
   else:
-    let
+    var
       bitInfo = getBitInfo(size, offset)
       read = bitInfo.read
       skip = bitInfo.skip
       shift = bitInfo.shift
       mask = bitInfo.mask
+    if shift < 0:
+      shift+=8
+      read+=1
     result = newStmtList()
     if read == skip:
       result.add(quote do:
         if `stream`.readData(`field`.addr, `read`) != `read`:
           raise newException(IOError,
-            "Unable to read the requested amount of bytes from file")
+        "Unable to read " & $`read` & " byte" & (if `read` > 1: "s" else: "") & " from file " &
+            "at position: " & $`stream`.getPosition())
       )
     else:
       result.add(quote do:
@@ -254,15 +262,17 @@ proc createReadStatement(
 
 proc createWriteStatement(
   field: NimNode,
-  info: tuple[size: BiggestInt, kind: NimNode, custom: NimNode],
-  offset: var BiggestInt, stream: NimNode): NimNode {.compileTime.} =
+  info: tuple[size: BiggestInt, kind, customReader, customWriter: NimNode],
+  offset: var BiggestInt, stream: NimNode,
+  tmpVar: NimNode = nil): NimNode {.compileTime.} =
   let
     size = info.size
     kind = info.kind
-    custom = info.custom
+    custom = info.customWriter
   if custom != nil:
+    custom.add(field)
     result = (quote do:
-      raise newException(AssertionError, "Custom writers not implemented")
+      `custom`
     )
   elif info.kind.kind == nnkIdent and $info.kind.ident == "string":
     if offset != 0:
@@ -285,27 +295,32 @@ proc createWriteStatement(
       shift = bitInfo.shift
       mask = bitInfo.mask
     result = newStmtList()
-    if write == skip:
+    if info.size mod 8 == 0:
       result.add(quote do:
-        if `stream`.writeData(`field`.addr, `write`) != `write`:
-          raise newException(IOError,
-            "Unable to write the requested amount of bytes from file")
+        `stream`.writeData(`field`.addr, `write`)
       )
     else:
-      result.add(quote do:
-        var tmp: `kind`
-        if `stream`.peekData(tmp.addr, `write`) != `write`:
-          raise newException(IOError,
-            "Unable to write the requested amount of bytes from file")
-        tmp = tmp or (`field` shr `shift`) and `mask`
-        if `stream`.writeData(tmp.addr, `write`) != `write`:
-          raise newException(IOError,
-            "Unable to write the requested amount of bytes from file")
-      )
-    if skip != 0 and skip != write:
-      result.add(quote do:
-        `stream`.setPosition(`stream`.getPosition() - (`write` - `skip`))
-      )
+      if shift > 0:
+        result.add(quote do:
+          `tmpVar` = `tmpVar` or (`field` and `mask`) shl `shift`
+        )
+      else:
+        result.add(quote do:
+          `tmpVar` = `tmpVar` or (`field` and `mask`) shr -`shift`
+        )
+      if skip != 0:
+        if tmpVar != nil:
+          result.add(quote do:
+            `stream`.writeData(`tmpVar`.addr, `skip`)
+          )
+        else:
+          result.add(quote do:
+            `stream`.writeData(`field`.addr, `skip`)
+          )
+      if offset + size > (offset + size) mod 8:
+        result.add(quote do:
+          `tmpVar` = (`field` and `mask`) shl (8 + `shift`)
+        )
     offset += size
     offset = offset mod 8
 
@@ -317,7 +332,9 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   let
     body = paramsAndDef[^1]
     res = newIdentNode("result")
-    stream = genSym(nskParam)
+    stream = newIdentNode("stream")
+    input = newIdentNode("input")
+    #input = genSym(nskParam)
   var
     inner = newStmtList()
     writer = newStmtList()
@@ -352,18 +369,22 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     case def[1][0].kind:
       of nnkAsgn:
         let magic = def[1][0][1]
-        var sym: NimNode
+        var
+          sym: NimNode
+          writeSym: NimNode
         if $def[1][0][0].ident == "_":
           sym = genSym(nskVar)
+          writeSym = sym
           inner.add(quote do:
             var `sym`: `kind`
           )
           writer.add(quote do:
-            var `sym`: `kind` = `magic`
+            var `writeSym`: `kind` = `magic`
           )
           dec field
         else:
           sym = (quote do: `res`[`field`])
+          writeSym = (quote do: `input`[`field`])
           let
             resfield = newIdentNode($def[1][0][0])
           seenFields.add $def[1][0][0]
@@ -371,7 +392,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         if $info.kind == "string":
           info.size = ($magic).len
         inner.add(createReadStatement(sym, info, offset, stream))
-        writer.add(createWriteStatement(sym, info, offset, stream))
+        writer.add(createWriteStatement(writeSym, info, offset, stream))
         inner.add(quote do:
           if `sym` != `magic`:
             raise newException(MagicError,
@@ -391,24 +412,48 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           )
         )
         let
-          ii = genSym(if def[1][0].len == 2: nskForvar else: nskVar)
+          ii = genSym(nskVar)
+          tmpVar = genSym(nskVar)
           startOffset = offset
-        var readFieldOps = @[
-          createReadStatement(
-            (quote do: `res`[`field`][`ii`]), info, offset, stream
-          )
-        ]
+        var
+          readFieldOps = @[
+            createReadStatement(
+              (quote do: `res`[`field`][`ii`]), info, offset, stream
+            )
+          ]
         while startOffset != offset:
           readFieldOps.add createReadStatement(
             (quote do: `res`[`field`][`ii`]), info, offset, stream
           )
-        let readFieldCount = readFieldOps.len
-        var readField = nnkCaseStmt.newTree(
-          (quote do: `ii` mod `readFieldCount`)
-        )
+        var
+          writeFieldOps = @[
+            createWriteStatement(
+              (quote do: `input`[`field`][`ii`]), info, offset, stream, tmpVar
+            )
+          ]
+        while startOffset != offset:
+          writeFieldOps.add createWriteStatement(
+            (quote do: `input`[`field`][`ii`]), info, offset, stream, tmpVar
+          )
+        let
+          readFieldCount = readFieldOps.len
+          writeFieldCount = writeFieldOps.len
+        var
+          readField = nnkCaseStmt.newTree(
+            (quote do: `ii` mod `readFieldCount`)
+          )
+          writeField = nnkCaseStmt.newTree(
+            (quote do: `ii` mod `writeFieldCount`)
+          )
         var iii = 0
         for curField in readFieldOps:
           readField.add(nnkOfBranch.newTree(
+            newLit(iii), curField
+          ))
+          inc iii
+        iii = 0
+        for curField in writeFieldOps:
+          writeField.add(nnkOfBranch.newTree(
             newLit(iii), curField
           ))
           inc iii
@@ -417,14 +462,45 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
             nnkDiscardStmt.newTree(nnkEmpty.newNimNode())
           )
         )
+        writeField.add(
+          nnkElse.newTree(
+            nnkDiscardStmt.newTree(nnkEmpty.newNimNode())
+          )
+        )
+        let x = genSym(nskForvar)
+        var writeNull =
+          if $kind.ident == "string":
+            if size == 0:
+              (quote do:
+                `stream`.write(0'u8))
+            else:
+              (quote do:
+                if `size` != `x`.len:
+                  raise newException(AssertionError,
+                    "String for field of static length not right size"))
+          else:
+            newStmtList()
+        if $kind.ident != "string":
+          writer.add(quote do:
+            var `tmpVar`: `kind` = 0
+          )
+        writer.add(quote do:
+          var `ii` = 0
+          while `ii` < (`input`[`field`].len):
+            `writeField`
+            `writeNull`
+            inc `ii`
+        )
         if def[1][0].len == 2:
           var
             fields = def[1][0][1]
           fields.replace(seenFields)
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`](`fields`)
-            for `ii` in 0..<(`fields`).int:
+            var `ii` = 0
+            while `ii` < (`fields`).int:
               `readField`
+              inc `ii`
           )
         else:
           let endMagic = body[i+1]
@@ -465,13 +541,25 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
       of nnkIdent:
         if $def[1][0].ident == "_":
           if def[0].kind == nnkIdent and $def[0].ident == "s":
+            writer.add(quote do:
+              `stream`.write(0'u8)
+            )
             inner.add(quote do:
               while (`stream`.readint8() != 0): discard
             )
             dec field
           else:
+            let jump =
+              if size mod 8 != 0:
+                if (offset+size) mod 8 < offset+size: 1 else: 0
+              else:
+                0
+            writer.add(quote do:
+              for i in 0..<(`size` div 8 + `jump`):
+                `stream`.write(0'u8)
+            )
             inner.add(quote do:
-              `stream`.setPosition(`stream`.getPosition()+`size` div 8)
+              `stream`.setPosition(`stream`.getPosition()+`size` div 8 + `jump`)
             )
             offset += size
             offset = offset mod 8
@@ -489,21 +577,36 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           )
           writer.add(
             createWriteStatement(
-              (quote do: `res`[`field`]), info, offset, stream
+              (quote do: `input`[`field`]), info, offset, stream
             )
           )
       else:
         discard
+    #[
+    inner.add(quote do:
+      when `field` >= 0:
+        echo "Done reading field " & $`i` & ": " & $`res`[`field`]
+      else:
+        echo "Done reading field " & $`i`
+    )
+    ]#
     inc i
     inc field
+  let
+    readerName = genSym(nskProc)
+    writerName = genSym(nskProc)
   result = quote do:
-    proc `name`(`stream`: Stream): `tupleMeat` =
+    proc `readerName`(`stream`: Stream): `tupleMeat` =
       `inner`
+    proc `writerName`(`stream`: Stream, `input`: var `tupleMeat`) =
+      `writer`
+    let `name` = (read: `readerName`, writes: `writerName`)
   for p in extraParams:
-    result[3].add p
+    result[0][3].add p
 
   echo result.toStrLit
-  echo writer.toStrLit
+  #echo result.treeRepr
+  #echo writer.toStrLit
 
 when isMainModule:
   createParser(list, size: uint16):
@@ -519,12 +622,19 @@ when isMainModule:
     *list(size): inner
     u8: _ = 67
 
+#  createParser(tert):
+#    3: test[8]
+
   block parse:
     var fs = newFileStream("data.hex", fmRead)
     defer: fs.close()
     if not fs.isNil:
-      var data = myParser(fs)
+      var data = myParser.read(fs)
       echo data.size
       echo data.data
       echo data.str
       echo data.inner.data
+      var fs2 = newFileStream("out.hex", fmWrite)
+      defer: fs2.close()
+      if not fs2.isNil:
+        myParser.writes(fs2, data)
