@@ -54,10 +54,18 @@ and then pass that parser to the outer parser. This means that you can easily
 nest parsers. If you need values from the outer parser you can add parameters
 to the inner parser by giving it colon expressions before the body (e.g the
 call ``createParser(list, size: uint16)`` would create a parser
-``proc list(stream: Stream, size: uint16): <return type>``). To call a parser
+``proc (stream: Stream, size: uint16): <return type>``). To call a parser
 use the ``*`` type as described above and give it the name of the parser and
 any optional arguments. The stream object will get added automatically as the
 first parameter.
+
+When creating a parser you get a tuple with two members, ``get`` and ``put``
+which is stored by a let as the identifier given when calling createParser.
+These are both procedures, the first only takes a stream (and any optional
+arguments as described above) and returns a tuple containing all the fields.
+The second takes a stream and a tuple containing all the fields, this is the
+same tuple returned by the ``get`` procedure and writes the format to the
+stream.
 
 Example:
 In lieu of proper examples the binaryparse.nim file contains a ``when

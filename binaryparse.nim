@@ -52,10 +52,18 @@
 ## nest parsers. If you need values from the outer parser you can add parameters
 ## to the inner parser by giving it colon expressions before the body (e.g the
 ## call ``createParser(list, size: uint16)`` would create a parser
-## ``proc list(stream: Stream, size: uint16): <return type>``). To call a parser
+## ``proc (stream: Stream, size: uint16): <return type>``). To call a parser
 ## use the ``*`` type as described above and give it the name of the parser and
 ## any optional arguments. The stream object will get added automatically as the
 ## first parameter.
+##
+## When creating a parser you get a tuple with two members, ``get`` and ``put``
+## which is stored by a let as the identifier given when calling createParser.
+## These are both procedures, the first only takes a stream (and any optional
+## arguments as described above) and returns a tuple containing all the fields.
+## The second takes a stream and a tuple containing all the fields, this is the
+## same tuple returned by the ``get`` procedure and writes the format to the
+## stream.
 ##
 ## Example:
 ## In lieu of proper examples the binaryparse.nim file contains a ``when
@@ -151,8 +159,8 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
     of nnkCall:
       var
         t0 = t[0]
-        customProcRead = newCall(nnkDotExpr.newTree(t[0], newIdentNode("read")), stream)
-        customProcWrite = newCall(nnkDotExpr.newTree(t[0], newIdentNode("writes")), stream)
+        customProcRead = newCall(nnkDotExpr.newTree(t[0], newIdentNode("get")), stream)
+        customProcWrite = newCall(nnkDotExpr.newTree(t[0], newIdentNode("put")), stream)
         retType = quote do:
           typeGetter(`t0`)
         i = 1
@@ -160,7 +168,6 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
         customProcRead.add(t[i])
         inc i
       customProcRead.replace(seenFields)
-      echo t.treeRepr
       return (size: BiggestInt(0), kind: retType, customReader: customProcRead, customWriter: customProcWrite)
     else:
       raise newException(AssertionError,
@@ -326,9 +333,12 @@ proc createWriteStatement(
 
 
 macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
-  ## The main macro in this module. It takes the ``name`` of the procedure to
+  ## The main macro in this module. It takes the ``name`` of the tuple to
   ## create along with a block on the format described above and creates a
-  ## parser for it on the form ``proc <name>(Stream): tuple[<fields>]``
+  ## reader and a writer for it. The output is a tuple with ``name`` that has
+  ## two fields ``get`` and ``put``. Get is on the form
+  ## ``proc (stream: Stream): tuple[<fields>]`` and put is
+  ## ``proc (stream: Stream, input: tuple[<fields>])``
   let
     body = paramsAndDef[^1]
     res = newIdentNode("result")
@@ -583,6 +593,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
       else:
         discard
     #[
+    # This can be used for debugging, should possibly be exposed by a flag
     inner.add(quote do:
       when `field` >= 0:
         echo "Done reading field " & $`i` & ": " & $`res`[`field`]
@@ -600,13 +611,12 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
       `inner`
     proc `writerName`(`stream`: Stream, `input`: var `tupleMeat`) =
       `writer`
-    let `name` = (read: `readerName`, writes: `writerName`)
+    let `name` = (get: `readerName`, put: `writerName`)
   for p in extraParams:
     result[0][3].add p
 
   echo result.toStrLit
   #echo result.treeRepr
-  #echo writer.toStrLit
 
 when isMainModule:
   createParser(list, size: uint16):
@@ -629,7 +639,7 @@ when isMainModule:
     var fs = newFileStream("data.hex", fmRead)
     defer: fs.close()
     if not fs.isNil:
-      var data = myParser.read(fs)
+      var data = myParser.get(fs)
       echo data.size
       echo data.data
       echo data.str
@@ -637,4 +647,4 @@ when isMainModule:
       var fs2 = newFileStream("out.hex", fmWrite)
       defer: fs2.close()
       if not fs2.isNil:
-        myParser.writes(fs2, data)
+        myParser.put(fs2, data)
