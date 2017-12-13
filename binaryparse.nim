@@ -632,8 +632,8 @@ when isMainModule:
     *list(size): inner
     u8: _ = 67
 
-#  createParser(tert):
-#    3: test[8]
+  createParser(tert):
+    3: test[8]
 
   block parse:
     var fs = newFileStream("data.hex", fmRead)
@@ -644,7 +644,9 @@ when isMainModule:
       echo data.data
       echo data.str
       echo data.inner.data
-      var fs2 = newFileStream("out.hex", fmWrite)
-      defer: fs2.close()
-      if not fs2.isNil:
-        myParser.put(fs2, data)
+    var fs2 = newFileStream("out.hex", fmWrite)
+    defer: fs2.close()
+    if not fs2.isNil:
+      var data: typeGetter(tert)
+      data.test = @[1'i8, 2, 3, 4, 5, 6, 7, 0]
+      tert.put(fs2, data)
