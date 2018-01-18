@@ -109,6 +109,44 @@ macro typeGetter*(body: typed): untyped =
   ## Helper macro to get the return type of custom parsers
   body.getTypeImpl[0][1][0][0]
 
+template writeDataBE*(stream: Stream, buffer: pointer, size: int) =
+  for i in 0..<size:
+    let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
+    stream.writeData(tmp, 1)
+
+template writeDataLE*(stream: Stream, buffer: pointer, size: int) =
+  for i in 0..<size:
+    let tmp = cast[pointer](cast[int](buffer) + i)
+    stream.writeData(tmp, 1)
+
+template readDataBE*(stream: Stream, buffer: pointer, size: int) =
+  for i in 0..<size:
+    let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
+    if stream.readData(tmp, 1) != 1:
+      raise newException(IOError,
+        "Unable to read the requested amount of bytes from file")
+
+template readDataLE*(stream: Stream, buffer: pointer, size: int) =
+  for i in 0..<size:
+    let tmp = cast[pointer](cast[int](buffer) + i)
+    if stream.readData(tmp, 1) != 1:
+      raise newException(IOError,
+        "Unable to read the requested amount of bytes from file")
+
+template peekDataBE*(stream: Stream, buffer: pointer, size: int) =
+  for i in 0..<size:
+    let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
+    if stream.peekData(tmp, 1) != 1:
+      raise newException(IOError,
+        "Unable to peek the requested amount of bytes from file")
+
+template peekDataLE*(stream: Stream, buffer: pointer, size: int) =
+  for i in 0..<size:
+    let tmp = cast[pointer](cast[int](buffer) + i)
+    if stream.peekData(tmp, 1) != 1:
+      raise newException(IOError,
+        "Unable to peek the requested amount of bytes from file")
+
 proc replace(node: var NimNode, seenFields: seq[string]) =
   if node.kind == nnkIdent:
     if $node.ident in seenFields:
@@ -305,9 +343,17 @@ proc createWriteStatement(
     result = newStmtList()
     if info.size mod 8 == 0:
       result.add(quote do:
-        `stream`.writeData(`field`.addr, `write`)
+        `stream`.writeDataLE(`field`.addr, `write`)
       )
     else:
+      if tmpVar == nil:
+        raise newException(AssertionError, "tmpVar cannot be nil when size mod" &
+          "8 != 0 and info.kind = " & $info.kind)
+      if tmpVar != nil and skip != 0 and skip != size div 8:
+        let addspace = (size div 8) * 8
+        result.add(quote do:
+          `tmpVar` = `tmpVar` shl `addspace`
+        )
       if shift > 0:
         result.add(quote do:
           `tmpVar` = `tmpVar` or (`field` and `mask`) shl `shift`
@@ -319,16 +365,19 @@ proc createWriteStatement(
       if skip != 0:
         if tmpVar != nil:
           result.add(quote do:
-            `stream`.writeData(`tmpVar`.addr, `skip`)
+            `stream`.writeDataLE(`tmpVar`.addr, `skip`)
+            `tmpVar` = 0
           )
         else:
           result.add(quote do:
-            `stream`.writeData(`field`.addr, `skip`)
+            `stream`.writeDataLE(`field`.addr, `skip`)
           )
+          #[
       if offset + size > (offset + size) mod 8:
         result.add(quote do:
           `tmpVar` = (`field` and `mask`) shl (8 + `shift`)
         )
+        ]#
     offset += size
     offset = offset mod 8
 
@@ -345,6 +394,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     res = newIdentNode("result")
     stream = newIdentNode("stream")
     input = newIdentNode("input")
+    tmpVar = genSym(nskVar)
     #input = genSym(nskParam)
   var
     inner = newStmtList()
@@ -352,7 +402,8 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     tupleMeat = nnkTupleTy.newNimNode
     i = 0
     field = 0
-    offset: BiggestInt = 0
+    readOffset: BiggestInt = 0
+    writeOffset: BiggestInt = 0
     seenFields = newSeq[string]()
     extraParams = newSeq[NimNode]()
   while i < paramsAndDef.len - 1:
@@ -402,8 +453,8 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           tupleMeat.add(nnkIdentDefs.newTree(resfield, kind, newEmptyNode()))
         if $info.kind == "string":
           info.size = ($magic).len
-        inner.add(createReadStatement(sym, info, offset, stream))
-        writer.add(createWriteStatement(writeSym, info, offset, stream))
+        inner.add(createReadStatement(sym, info, readOffset, stream))
+        writer.add(createWriteStatement(writeSym, info, writeOffset, stream))
         inner.add(quote do:
           if `sym` != `magic`:
             raise newException(MagicError,
@@ -424,27 +475,28 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         )
         let
           ii = genSym(nskVar)
-          tmpVar = genSym(nskVar)
-          startOffset = offset
+          #tmpVar = genSym(nskVar)
+          startReadOffset = readOffset
+          startWriteOffset = writeOffset
         var
           readFieldOps = @[
             createReadStatement(
-              (quote do: `res`[`field`][`ii`]), info, offset, stream
+              (quote do: `res`[`field`][`ii`]), info, readOffset, stream
             )
           ]
-        while startOffset != offset:
+        while startReadOffset != readOffset:
           readFieldOps.add createReadStatement(
-            (quote do: `res`[`field`][`ii`]), info, offset, stream
+            (quote do: `res`[`field`][`ii`]), info, readOffset, stream
           )
         var
           writeFieldOps = @[
             createWriteStatement(
-              (quote do: `input`[`field`][`ii`]), info, offset, stream, tmpVar
+              (quote do: `input`[`field`][`ii`]), info, writeOffset, stream, tmpVar
             )
           ]
-        while startOffset != offset:
+        while startWriteOffset != writeOffset:
           writeFieldOps.add createWriteStatement(
-            (quote do: `input`[`field`][`ii`]), info, offset, stream, tmpVar
+            (quote do: `input`[`field`][`ii`]), info, writeOffset, stream, tmpVar
           )
         let
           readFieldCount = readFieldOps.len
@@ -523,7 +575,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
             magic = endMagic[1][0][1]
             endKind = endInfo.kind
             peek = newIdentNode("peek" & $endInfo.kind)
-            bitInfo = getBitInfo(endInfo.size, offset)
+            bitInfo = getBitInfo(endInfo.size, readOffset)
             shift = bitInfo.shift
             mask = bitInfo.mask
           inner.add(quote do:
@@ -548,7 +600,8 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
                 `readField`
                 inc `ii`
             )
-        offset = 0
+        readOffset = 0
+        writeOffset = 0
       of nnkIdent:
         if $def[1][0].ident == "_":
           if def[0].kind == nnkIdent and $def[0].ident == "s":
@@ -560,20 +613,28 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
             )
             dec field
           else:
-            let jump =
-              if size mod 8 != 0:
-                if (offset+size) mod 8 < offset+size: 1 else: 0
-              else:
-                0
+            let
+              readJump =
+                if size mod 8 != 0:
+                  if (readOffset+size) mod 8 < readOffset+size: 1 else: 0
+                else:
+                  0
+              writeJump =
+                if size mod 8 != 0:
+                  if (writeOffset+size) mod 8 < writeOffset+size: 1 else: 0
+                else:
+                  0
             writer.add(quote do:
-              for i in 0..<(`size` div 8 + `jump`):
+              for i in 0..<(`size` div 8 + `writeJump`):
                 `stream`.write(0'u8)
             )
             inner.add(quote do:
-              `stream`.setPosition(`stream`.getPosition()+`size` div 8 + `jump`)
+              `stream`.setPosition(`stream`.getPosition()+`size` div 8 + `readJump`)
             )
-            offset += size
-            offset = offset mod 8
+            readOffset += size
+            readOffset = readOffset mod 8
+            writeOffset += size
+            writeOffset = writeOffset mod 8
             dec field
         else:
           let
@@ -583,12 +644,14 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           tupleMeat.add(nnkIdentDefs.newTree(resfield, kind, newEmptyNode()))
           inner.add(
             createReadStatement(
-              (quote do: `res`[`field`]), info, offset, stream
+              (quote do: `res`[`field`]), info, readOffset, stream
             )
           )
+          echo $sym
+          echo "(" & $info.size & ", " & $writeOffset & ") -> " & $getBitInfo(info.size, writeOffset)
           writer.add(
             createWriteStatement(
-              (quote do: `input`[`field`]), info, offset, stream
+              (quote do: `input`[`field`]), info, writeOffset, stream, tmpVar
             )
           )
       else:
@@ -611,6 +674,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     proc `readerName`(`stream`: Stream): `tupleMeat` =
       `inner`
     proc `writerName`(`stream`: Stream, `input`: var `tupleMeat`) =
+      var `tmpVar`: int64 = 0
       `writer`
     let `name` = (get: `readerName`, put: `writerName`)
   for p in extraParams:
@@ -636,6 +700,12 @@ when isMainModule:
   createParser(tert):
     3: test[8]
 
+  createParser(ccsds_header):
+    u3: version
+    u1: packet_type
+    u1: secondary_header
+    u11: apid
+
   block parse:
     var fs = newFileStream("data.hex", fmRead)
     defer: fs.close()
@@ -651,3 +721,22 @@ when isMainModule:
       var data: typeGetter(tert)
       data.test = @[1'i8, 2, 3, 4, 5, 6, 7, 0]
       tert.put(fs2, data)
+    var fs3 = newFileStream("ccsds.hex", fmReadWrite)
+    defer: fs3.close()
+    if not fs3.isNil:
+      var data: typeGetter(ccsds_header)
+      data.version = 0
+      data.packet_type = 0
+      data.secondary_header = 1
+      data.apid = 6
+      ccsds_header.put(fs3, data)
+    var test: int64 = 0x31_32_33_34_35_36_37_38
+    var test2: int64 = 0
+    echo test
+    echo test.toHex
+    fs3.writeDataBE(test.addr, 8)
+    fs3.setPosition(2)
+    fs3.readDataLE(test2.addr, 8)
+    echo test2
+    echo test2.toHex
+
