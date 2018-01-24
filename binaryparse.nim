@@ -283,16 +283,11 @@ proc createReadStatement(
     result = newStmtList()
     if read == skip:
       result.add(quote do:
-        if `stream`.readData(`field`.addr, `read`) != `read`:
-          raise newException(IOError,
-        "Unable to read " & $`read` & " byte" & (if `read` > 1: "s" else: "") & " from file " &
-            "at position: " & $`stream`.getPosition())
+        `stream`.readDataBE(`field`.addr, `read`)
       )
     else:
       result.add(quote do:
-        if `stream`.peekData(`field`.addr, `read`) != `read`:
-          raise newException(IOError,
-            "Unable to peek the requested amount of bytes from file")
+        `stream`.peekDataBE(`field`.addr, `read`)
       )
     if skip != 0 and skip != read:
       result.add(quote do:
@@ -328,9 +323,10 @@ proc createWriteStatement(
         `stream`.write(`field`)
       )
     else:
+      let fieldName = field.toStrLit
       result = (quote do:
         if `size` != `field`.len:
-          raise newException(AssertionError, "String of given size not matching")
+          raise newException(AssertionError, "String " & `fieldName` & " of given size not matching")
         `stream`.write(`field`)
       )
   else:
@@ -343,34 +339,37 @@ proc createWriteStatement(
     result = newStmtList()
     if info.size mod 8 == 0:
       result.add(quote do:
-        `stream`.writeDataLE(`field`.addr, `write`)
+        `stream`.writeDataBE(`field`.addr, `write`)
       )
     else:
+      #[
       if tmpVar == nil:
         raise newException(AssertionError, "tmpVar cannot be nil when size mod" &
           "8 != 0 and info.kind = " & $info.kind)
-      if tmpVar != nil and skip != 0 and skip != size div 8:
-        let addspace = (size div 8) * 8
-        result.add(quote do:
-          `tmpVar` = `tmpVar` shl `addspace`
-        )
-      if shift > 0:
-        result.add(quote do:
-          `tmpVar` = `tmpVar` or (`field` and `mask`) shl `shift`
-        )
-      else:
-        result.add(quote do:
-          `tmpVar` = `tmpVar` or (`field` and `mask`) shr -`shift`
-        )
+      ]#
+      if tmpVar != nil:
+        if skip != 0 and skip != size div 8:
+          let addspace = (size div 8) * 8
+          result.add(quote do:
+            `tmpVar` = `tmpVar` shl `addspace`
+          )
+        if shift > 0:
+          result.add(quote do:
+            `tmpVar` = `tmpVar` or (`field` and `mask`) shl `shift`
+          )
+        else:
+          result.add(quote do:
+            `tmpVar` = `tmpVar` or (`field` and `mask`) shr -`shift`
+          )
       if skip != 0:
         if tmpVar != nil:
           result.add(quote do:
-            `stream`.writeDataLE(`tmpVar`.addr, `skip`)
+            `stream`.writeDataBE(`tmpVar`.addr, `skip`)
             `tmpVar` = 0
           )
         else:
           result.add(quote do:
-            `stream`.writeDataLE(`field`.addr, `skip`)
+            `stream`.writeDataBE(`field`.addr, `skip`)
           )
           #[
       if offset + size > (offset + size) mod 8:
@@ -547,13 +546,29 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           writer.add(quote do:
             var `tmpVar`: `kind` = 0
           )
-        writer.add(quote do:
-          var `ii` = 0
-          while `ii` < (`input`[`field`].len):
-            `writeField`
-            `writeNull`
-            inc `ii`
-        )
+        if def[1][0].len == 2:
+          var
+            fields = def[1][0][1]
+          fields.replace(seenFields)
+          writer.add(quote do:
+            if `input`[`field`].len < `fields`.int:
+              raise newException(AssertionError,
+                "Unable to write data with length " & $`input`[`field`].len &
+                ", expected " & $`fields`)
+            var `ii` = 0
+            while `ii` < (`fields`).int:
+              `writeField`
+              `writeNull`
+              inc `ii`
+          )
+        else:
+          writer.add(quote do:
+            var `ii` = 0
+            while `ii` < (`input`[`field`].len):
+              `writeField`
+              `writeNull`
+              inc `ii`
+          )
         if def[1][0].len == 2:
           var
             fields = def[1][0][1]
@@ -721,22 +736,4 @@ when isMainModule:
       var data: typeGetter(tert)
       data.test = @[1'i8, 2, 3, 4, 5, 6, 7, 0]
       tert.put(fs2, data)
-    var fs3 = newFileStream("ccsds.hex", fmReadWrite)
-    defer: fs3.close()
-    if not fs3.isNil:
-      var data: typeGetter(ccsds_header)
-      data.version = 0
-      data.packet_type = 0
-      data.secondary_header = 1
-      data.apid = 6
-      ccsds_header.put(fs3, data)
-    var test: int64 = 0x31_32_33_34_35_36_37_38
-    var test2: int64 = 0
-    echo test
-    echo test.toHex
-    fs3.writeDataBE(test.addr, 8)
-    fs3.setPosition(2)
-    fs3.readDataLE(test2.addr, 8)
-    echo test2
-    echo test2.toHex
 
