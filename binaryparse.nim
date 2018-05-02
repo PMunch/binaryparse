@@ -147,15 +147,15 @@ template peekDataLE*(stream: Stream, buffer: pointer, size: int) =
       raise newException(IOError,
         "Unable to peek the requested amount of bytes from file")
 
-proc replace(node: var NimNode, seenFields: seq[string]) =
+proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode = newIdentNode("result")) =
   if node.kind == nnkIdent:
     if $node.ident in seenFields:
-      node = newDotExpr(newIdentNode("result"), node)
+      node = newDotExpr(parent, node)
   else:
     var i = 0
     while i < len(node):
       var n = node[i]
-      n.replace(seenFields)
+      n.replace(seenFields, parent)
       node[i] = n
       inc i
 
@@ -353,13 +353,13 @@ proc createWriteStatement(
           result.add(quote do:
             `tmpVar` = `tmpVar` shl `addspace`
           )
-        if shift > 0:
+        if shift >= 0:
           result.add(quote do:
-            `tmpVar` = `tmpVar` or (`field` and `mask`) shl `shift`
+            `tmpVar` = `tmpVar` or (`field` and `mask`).int64 shl `shift`
           )
         else:
           result.add(quote do:
-            `tmpVar` = `tmpVar` or (`field` and `mask`) shr -`shift`
+            `tmpVar` = `tmpVar` or (`field` and `mask`).int64 shr -`shift`
           )
       if skip != 0:
         if tmpVar != nil:
@@ -394,7 +394,6 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     stream = newIdentNode("stream")
     input = newIdentNode("input")
     tmpVar = genSym(nskVar)
-    #input = genSym(nskParam)
   var
     inner = newStmtList()
     writer = newStmtList()
@@ -474,7 +473,6 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         )
         let
           ii = genSym(nskVar)
-          #tmpVar = genSym(nskVar)
           startReadOffset = readOffset
           startWriteOffset = writeOffset
         var
@@ -542,21 +540,13 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
                     "String for field of static length not right size"))
           else:
             newStmtList()
-        if $kind.ident != "string":
-          writer.add(quote do:
-            var `tmpVar`: `kind` = 0
-          )
         if def[1][0].len == 2:
           var
-            fields = def[1][0][1]
-          fields.replace(seenFields)
+            fields = def[1][0][1].copyNimTree
+          fields.replace(seenFields, input)
           writer.add(quote do:
-            if `input`[`field`].len < `fields`.int:
-              raise newException(AssertionError,
-                "Unable to write data with length " & $`input`[`field`].len &
-                ", expected " & $`fields`)
             var `ii` = 0
-            while `ii` < (`fields`).int:
+            while `ii` < (`input`[`field`].len).int:
               `writeField`
               `writeNull`
               inc `ii`
@@ -571,7 +561,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           )
         if def[1][0].len == 2:
           var
-            fields = def[1][0][1]
+            fields = def[1][0][1].copyNimTree
           fields.replace(seenFields)
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`](`fields`)
@@ -662,8 +652,6 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
               (quote do: `res`[`field`]), info, readOffset, stream
             )
           )
-          echo $sym
-          echo "(" & $info.size & ", " & $writeOffset & ") -> " & $getBitInfo(info.size, writeOffset)
           writer.add(
             createWriteStatement(
               (quote do: `input`[`field`]), info, writeOffset, stream, tmpVar
@@ -671,15 +659,14 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           )
       else:
         discard
-    #[
-    # This can be used for debugging, should possibly be exposed by a flag
-    inner.add(quote do:
-      when `field` >= 0:
-        echo "Done reading field " & $`i` & ": " & $`res`[`field`]
-      else:
-        echo "Done reading field " & $`i`
-    )
-    ]#
+    when defined(binaryparseLog):
+      # This can be used for debugging, should possibly be exposed by a flag
+      inner.add(quote do:
+        when `field` >= 0:
+          echo "Done reading field " & $`i` & ": " & $`res`[`field`]
+        else:
+          echo "Done reading field " & $`i`
+      )
     inc i
     inc field
   let
@@ -695,8 +682,8 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   for p in extraParams:
     result[0][3].add p
 
-  echo result.toStrLit
-  #echo result.treeRepr
+  when defined(binaryparseEcho):
+    echo result.toStrLit
 
 when isMainModule:
   createParser(list, size: uint16):
@@ -720,6 +707,10 @@ when isMainModule:
     u1: packet_type
     u1: secondary_header
     u11: apid
+
+  createParser(debug):
+    u8: _ = 128
+    u16: size
 
   block parse:
     var fs = newFileStream("data.hex", fmRead)
