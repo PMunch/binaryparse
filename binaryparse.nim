@@ -542,8 +542,9 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
             newStmtList()
         if def[1][0].len == 2:
           var
-            fields = def[1][0][1].copyNimTree
-          fields.replace(seenFields, input)
+            readFields = def[1][0][1].copyNimTree
+            writeFields = def[1][0][1].copyNimTree
+          writeFields.replace(seenFields, input)
           writer.add(quote do:
             var `ii` = 0
             while `ii` < (`input`[`field`].len).int:
@@ -551,26 +552,18 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
               `writeNull`
               inc `ii`
           )
-        else:
-          writer.add(quote do:
-            var `ii` = 0
-            while `ii` < (`input`[`field`].len):
-              `writeField`
-              `writeNull`
-              inc `ii`
-          )
-        if def[1][0].len == 2:
-          var
-            fields = def[1][0][1].copyNimTree
-          fields.replace(seenFields)
+          readFields.replace(seenFields)
           inner.add(quote do:
-            `res`[`field`] = newSeq[`kind`](`fields`)
+            `res`[`field`] = newSeq[`kind`](`readFields`)
             var `ii` = 0
-            while `ii` < (`fields`).int:
+            while `ii` < (`readFields`).int:
               `readField`
               inc `ii`
           )
         else:
+          if body.len == i+1:
+            raise newException(AssertionError,
+              "Open arrays must be followed by magic for termination")
           let endMagic = body[i+1]
           if endMagic[1][0].kind != nnkAsgn:
             raise newException(AssertionError,
@@ -586,6 +579,13 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`]()
             var `ii` = 0
+          )
+          writer.add(quote do:
+            var `ii` = 0
+            while `ii` < (`input`[`field`].len):
+              `writeField`
+              `writeNull`
+              inc `ii`
           )
           if $endInfo.kind != "string":
             inner.add(quote do:
@@ -721,6 +721,10 @@ when isMainModule:
       echo data.data
       echo data.str
       echo data.inner.data
+      var fs3 = newFileStream("data_out.hex", fmWrite)
+      defer: fs3.close()
+      if not fs3.isNil:
+        myParser.put(fs3, data)
     var fs2 = newFileStream("out.hex", fmWrite)
     defer: fs2.close()
     if not fs2.isNil:
