@@ -38,11 +38,12 @@
 ##
 ## To read more fields of a certain kind into a sequence you can use the option
 ## ``[[count]]`` (that is square brackets with an optional count inside). If no
-## count is specified and the brackets left empty the next field needs to be a
-## magic number and will be used to terminate the sequence. As count you can use
-## the name of any previous field, literals, previously defined variables, or a
-## combination. Note that all sequences are assumed to terminate on a byte
-## border, even if given a statically evaluatable size.
+## count is specified and the brackets left empty it must be the last field or
+## the next field needs to be a magic number and will be used to terminate the
+## sequence. If it is the last field it will read until the end of the stream.
+## As count you can use the name of any previous field, literals, previously
+## defined variables, or a combination. Note that all sequences are assumed to
+## terminate on a byte border, even if given a statically evaluatable size.
 ##
 ## Another thing commonly found in binary formats are repeating blocks or
 ## formats within the format. These can be read by using a custom parser.
@@ -529,7 +530,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         )
         let x = genSym(nskForvar)
         var writeNull =
-          if $kind.ident == "string":
+          if kind.kind == nnkIdent and $kind.ident == "string":
             if size == 0:
               (quote do:
                 `stream`.write(0'u8))
@@ -561,46 +562,46 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
               inc `ii`
           )
         else:
-          if body.len == i+1:
-            raise newException(AssertionError,
-              "Open arrays must be followed by magic for termination")
-          let endMagic = body[i+1]
-          if endMagic[1][0].kind != nnkAsgn:
-            raise newException(AssertionError,
-              "Open arrays must be followed by magic for termination")
-          let
-            endInfo = decodeType(endMagic[0], stream, seenFields)
-            magic = endMagic[1][0][1]
-            endKind = endInfo.kind
-            peek = newIdentNode("peek" & $endInfo.kind)
-            bitInfo = getBitInfo(endInfo.size, readOffset)
-            shift = bitInfo.shift
-            mask = bitInfo.mask
-          inner.add(quote do:
-            `res`[`field`] = newSeq[`kind`]()
-            var `ii` = 0
-          )
-          writer.add(quote do:
-            var `ii` = 0
-            while `ii` < (`input`[`field`].len):
-              `writeField`
-              `writeNull`
-              inc `ii`
-          )
-          if $endInfo.kind != "string":
+          if body.len > i+1:
+            let endMagic = body[i+1]
+            if endMagic[1][0].kind != nnkAsgn:
+              raise newException(AssertionError,
+                "Open arrays must be followed by magic for termination")
+            let
+              endInfo = decodeType(endMagic[0], stream, seenFields)
+              magic = endMagic[1][0][1]
+              endKind = endInfo.kind
+              peek = newIdentNode("peek" & $endInfo.kind)
+              bitInfo = getBitInfo(endInfo.size, readOffset)
+              shift = bitInfo.shift
+              mask = bitInfo.mask
             inner.add(quote do:
-              while ((`stream`.`peek`() shr
-                    (((`readFieldCount` - 1) - (`ii` mod `readFieldCount`)) *
-                    `shift`)) and `mask`).`endKind` != `magic`.`endKind`:
-                `res`[`field`].setLen(`res`[`field`].len+1)
-                `readField`
-                inc `ii`
-              `stream`.setPosition(`stream`.getPosition()+sizeof(`endKind`))
+              `res`[`field`] = newSeq[`kind`]()
+              var `ii` = 0
             )
-            inc i
+            if $endInfo.kind != "string":
+              inner.add(quote do:
+                while ((`stream`.`peek`() shr
+                      (((`readFieldCount` - 1) - (`ii` mod `readFieldCount`)) *
+                      `shift`)) and `mask`).`endKind` != `magic`.`endKind`:
+                  `res`[`field`].setLen(`res`[`field`].len+1)
+                  `readField`
+                  inc `ii`
+                `stream`.setPosition(`stream`.getPosition()+sizeof(`endKind`))
+              )
+              inc i
+            else:
+              inner.add(quote do:
+                while `stream`.peekStr(len(`magic`)) != `magic`:
+                  `res`[`field`].setLen(`res`[`field`].len+1)
+                  `readField`
+                  inc `ii`
+              )
           else:
             inner.add(quote do:
-              while `stream`.peekStr(len(`magic`)) != `magic`:
+              `res`[`field`] = newSeq[`kind`]()
+              var `ii` = 0
+              while not `stream`.atEnd:
                 `res`[`field`].setLen(`res`[`field`].len+1)
                 `readField`
                 inc `ii`
@@ -712,6 +713,13 @@ when isMainModule:
     u8: _ = 128
     u16: size
 
+  createParser(twoInts):
+    8: first
+    8: second
+
+  createParser(test):
+    *twoInts: fields[]
+
   block parse:
     var fs = newFileStream("data.hex", fmRead)
     defer: fs.close()
@@ -731,4 +739,11 @@ when isMainModule:
       var data: typeGetter(tert)
       data.test = @[1'i8, 2, 3, 4, 5, 6, 7, 0]
       tert.put(fs2, data)
+    var ss = newStringStream("Hello world!")
+    var readData = test.get(ss)
+    echo readData
+    var ss2 = newStringStream()
+    test.put(ss2, readData)
+    ss2.setPosition(0)
+    echo ss2.readAll()
 

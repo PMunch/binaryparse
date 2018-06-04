@@ -40,11 +40,12 @@ terminating NULL byte use ``\0`` in the string literal.
 
 To read more fields of a certain kind into a sequence you can use the option
 ``[[count]]`` (that is square brackets with an optional count inside). If no
-count is specified and the brackets left empty the next field needs to be a
-magic number and will be used to terminate the sequence. As count you can use
-the name of any previous field, literals, previously defined variables, or a
-combination. Note that all sequences are assumed to terminate on a byte
-border, even if given a statically evaluatable size.
+count is specified and the brackets left empty it must be the last field or
+the next field needs to be a magic number and will be used to terminate the
+sequence. If it is the last field it will read until the end of the stream.
+As count you can use the name of any previous field, literals, previously
+defined variables, or a combination. Note that all sequences are assumed to
+terminate on a byte border, even if given a statically evaluatable size.
 
 Another thing commonly found in binary formats are repeating blocks or
 formats within the format. These can be read by using a custom parser.
