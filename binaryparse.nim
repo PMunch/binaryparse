@@ -541,18 +541,15 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
                     "String for field of static length not right size"))
           else:
             newStmtList()
+        writer.add(quote do:
+          var `ii` = 0
+          while `ii` < (`input`[`field`].len).int:
+            `writeField`
+            `writeNull`
+            inc `ii`
+        )
         if def[1][0].len == 2:
-          var
-            readFields = def[1][0][1].copyNimTree
-            writeFields = def[1][0][1].copyNimTree
-          writeFields.replace(seenFields, input)
-          writer.add(quote do:
-            var `ii` = 0
-            while `ii` < (`input`[`field`].len).int:
-              `writeField`
-              `writeNull`
-              inc `ii`
-          )
+          var readFields = def[1][0][1].copyNimTree
           readFields.replace(seenFields)
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`](`readFields`)
@@ -720,6 +717,9 @@ when isMainModule:
   createParser(test):
     *twoInts: fields[]
 
+  createParser(terminatedInts):
+    u32: myInts[]
+
   block parse:
     var fs = newFileStream("data.hex", fmRead)
     defer: fs.close()
@@ -746,4 +746,12 @@ when isMainModule:
     test.put(ss2, readData)
     ss2.setPosition(0)
     echo ss2.readAll()
+
+    var
+      ss3 = newStringStream()
+      outData: typeGetter(terminatedInts)
+    outData.myInts = @[1'u32,2,3,4,5,6]
+    terminatedInts.put(ss3, outData)
+    ss3.setPosition(0)
+    echo terminatedInts.get(ss3)
 
