@@ -150,7 +150,7 @@ template peekDataLE*(stream: Stream, buffer: pointer, size: int) =
 
 proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode = newIdentNode("result")) =
   if node.kind == nnkIdent:
-    if $node.ident in seenFields:
+    if node.strVal in seenFields:
       node = newDotExpr(parent, node)
   else:
     var i = 0
@@ -172,19 +172,19 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
       size = t.intVal
       kindPrefix = "int"
     of nnkIdent:
-      case ($t.ident)[0]:
+      case (t.strVal)[0]:
         of 'u':
-          size = ($t.ident)[1..^1].parseBiggestInt
+          size = (t.strVal)[1..^1].parseBiggestInt
           kindPrefix = "uint"
         of 'f':
-          size = ($t.ident)[1..^1].parseBiggestInt
+          size = (t.strVal)[1..^1].parseBiggestInt
           kindPrefix = "float"
           if size != 32 and size != 64:
             raise newException(AssertionError,
               "Only 32 and 64 bit floats are supported")
         of 's':
-          if ($t.ident).len != 1:
-            size = ($t.ident)[1..^1].parseBiggestInt
+          if (t.strVal).len != 1:
+            size = (t.strVal)[1..^1].parseBiggestInt
           else:
             size = 0
           return (
@@ -195,7 +195,7 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
           )
         else:
           raise newException(AssertionError,
-            "Format " & $t.ident & " not supported")
+            "Format " & t.strVal & " not supported")
     of nnkCall:
       var
         t0 = t[0]
@@ -254,7 +254,7 @@ proc createReadStatement(
     result = (quote do:
       `field` = `custom`
     )
-  elif info.kind.kind == nnkIdent and $info.kind.ident == "string":
+  elif info.kind.kind == nnkIdent and info.kind.strVal == "string":
     if offset != 0:
       raise newException(AssertionError, "Strings must be on byte boundry")
     if size == 0:
@@ -316,7 +316,7 @@ proc createWriteStatement(
     result = (quote do:
       `custom`
     )
-  elif info.kind.kind == nnkIdent and $info.kind.ident == "string":
+  elif info.kind.kind == nnkIdent and info.kind.strVal == "string":
     if offset != 0:
       raise newException(AssertionError, "Strings must be on byte boundry")
     if size == 0:
@@ -433,9 +433,9 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         var
           sym: NimNode
           writeSym: NimNode
-        if $def[1][0][0].ident == "_":
+        if def[1][0][0].strVal == "_":
           sym = genSym(nskVar)
-          writeSym = sym
+          writeSym = genSym(nskVar)
           inner.add(quote do:
             var `sym`: `kind`
           )
@@ -473,38 +473,39 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           )
         )
         let
-          ii = genSym(nskVar)
+          iiRead = genSym(nskVar)
+          iiWrite = genSym(nskVar)
           startReadOffset = readOffset
           startWriteOffset = writeOffset
         var
           readFieldOps = @[
             createReadStatement(
-              (quote do: `res`[`field`][`ii`]), info, readOffset, stream
+              (quote do: `res`[`field`][`iiRead`]), info, readOffset, stream
             )
           ]
         while startReadOffset != readOffset:
           readFieldOps.add createReadStatement(
-            (quote do: `res`[`field`][`ii`]), info, readOffset, stream
+            (quote do: `res`[`field`][`iiRead`]), info, readOffset, stream
           )
         var
           writeFieldOps = @[
             createWriteStatement(
-              (quote do: `input`[`field`][`ii`]), info, writeOffset, stream, tmpVar
+              (quote do: `input`[`field`][`iiWrite`]), info, writeOffset, stream, tmpVar
             )
           ]
         while startWriteOffset != writeOffset:
           writeFieldOps.add createWriteStatement(
-            (quote do: `input`[`field`][`ii`]), info, writeOffset, stream, tmpVar
+            (quote do: `input`[`field`][`iiWrite`]), info, writeOffset, stream, tmpVar
           )
         let
           readFieldCount = readFieldOps.len
           writeFieldCount = writeFieldOps.len
         var
           readField = nnkCaseStmt.newTree(
-            (quote do: `ii` mod `readFieldCount`)
+            (quote do: `iiRead` mod `readFieldCount`)
           )
           writeField = nnkCaseStmt.newTree(
-            (quote do: `ii` mod `writeFieldCount`)
+            (quote do: `iiWrite` mod `writeFieldCount`)
           )
         var iii = 0
         for curField in readFieldOps:
@@ -530,7 +531,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         )
         let x = genSym(nskForvar)
         var writeNull =
-          if kind.kind == nnkIdent and $kind.ident == "string":
+          if kind.kind == nnkIdent and kind.strVal == "string":
             if size == 0:
               (quote do:
                 `stream`.write(0'u8))
@@ -542,21 +543,21 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           else:
             newStmtList()
         writer.add(quote do:
-          var `ii` = 0
-          while `ii` < (`input`[`field`].len).int:
+          var `iiWrite` = 0
+          while `iiWrite` < (`input`[`field`].len).int:
             `writeField`
             `writeNull`
-            inc `ii`
+            inc `iiWrite`
         )
         if def[1][0].len == 2:
           var readFields = def[1][0][1].copyNimTree
           readFields.replace(seenFields)
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`](`readFields`)
-            var `ii` = 0
-            while `ii` < (`readFields`).int:
+            var `iiRead` = 0
+            while `iiRead` < (`readFields`).int:
               `readField`
-              inc `ii`
+              inc `iiRead`
           )
         else:
           if body.len > i+1:
@@ -574,16 +575,16 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
               mask = bitInfo.mask
             inner.add(quote do:
               `res`[`field`] = newSeq[`kind`]()
-              var `ii` = 0
+              var `iiRead` = 0
             )
             if $endInfo.kind != "string":
               inner.add(quote do:
                 while ((`stream`.`peek`() shr
-                      (((`readFieldCount` - 1) - (`ii` mod `readFieldCount`)) *
+                      (((`readFieldCount` - 1) - (`iiRead` mod `readFieldCount`)) *
                       `shift`)) and `mask`).`endKind` != `magic`.`endKind`:
                   `res`[`field`].setLen(`res`[`field`].len+1)
                   `readField`
-                  inc `ii`
+                  inc `iiRead`
                 `stream`.setPosition(`stream`.getPosition()+sizeof(`endKind`))
               )
               inc i
@@ -592,22 +593,22 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
                 while `stream`.peekStr(len(`magic`)) != `magic`:
                   `res`[`field`].setLen(`res`[`field`].len+1)
                   `readField`
-                  inc `ii`
+                  inc `iiRead`
               )
           else:
             inner.add(quote do:
               `res`[`field`] = newSeq[`kind`]()
-              var `ii` = 0
+              var `iiRead` = 0
               while not `stream`.atEnd:
                 `res`[`field`].setLen(`res`[`field`].len+1)
                 `readField`
-                inc `ii`
+                inc `iiRead`
             )
         readOffset = 0
         writeOffset = 0
       of nnkIdent:
-        if $def[1][0].ident == "_":
-          if def[0].kind == nnkIdent and $def[0].ident == "s":
+        if def[1][0].strVal == "_":
+          if def[0].kind == nnkIdent and def[0].strVal == "s":
             writer.add(quote do:
               `stream`.write(0'u8)
             )
