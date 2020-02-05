@@ -53,8 +53,8 @@
 ## and then pass that parser to the outer parser. This means that you can easily
 ## nest parsers. If you need values from the outer parser you can add parameters
 ## to the inner parser by giving it colon expressions before the body (e.g the
-## call ``createParser(list, size: uint16)`` would create a parser
-## ``proc (stream: Stream, size: uint16): <return type>``). To call a parser
+## call ``createParser(list, return_type, size: uint16)`` would create a parser
+## ``proc (stream: Stream, size: uint16): return_type``). To call a parser
 ## use the ``*`` type as described above and give it the name of the parser and
 ## any optional arguments. The stream object will get added automatically as the
 ## first parameter.
@@ -65,7 +65,8 @@
 ## arguments as described above) and returns a tuple containing all the fields.
 ## The second takes a stream and a tuple containing all the fields, this is the
 ## same tuple returned by the ``get`` procedure and writes the format to the
-## stream.
+## stream.  The name of the return type is specified in the second argument to
+## `createParser`.
 ##
 ## Example:
 ## In lieu of proper examples the binaryparse.nim file contains a ``when
@@ -382,7 +383,7 @@ proc createWriteStatement(
     offset = offset mod 8
 
 
-macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
+macro createParser*(name: untyped, tupleTypeName: untyped, paramsAndDef: varargs[untyped]): untyped =
   ## The main macro in this module. It takes the ``name`` of the tuple to
   ## create along with a block on the format described above and creates a
   ## reader and a writer for it. The output is a tuple with ``name`` that has
@@ -671,25 +672,30 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   let
     readerName = genSym(nskProc)
     writerName = genSym(nskProc)
+
   result = quote do:
-    proc `readerName`(`stream`: Stream): `tupleMeat` =
+    type `tupleTypeName`* = `tupleMeat`
+    proc `readerName`(`stream`: Stream): `tupleTypeName` =
       `inner`
-    proc `writerName`(`stream`: Stream, `input`: var `tupleMeat`) =
+    proc `writerName`(`stream`: Stream, `input`: var `tupleTypeName`) =
       var `tmpVar`: int64 = 0
       `writer`
+  
     let `name`* = (get: `readerName`, put: `writerName`)
+
+
   for p in extraParams:
-    result[0][3].add p
+    result[1][3].add p
 
   when defined(binaryparseEcho):
     echo result.toStrLit
 
 when isMainModule:
-  createParser(list, size: uint16):
+  createParser(list, list_tuple, size: uint16):
     u8: _
     u8: data[size]
 
-  createParser(myParser):
+  createParser(myParser, myParser_tuple):
     u8: _ = 128
     u16: size
     4: data[size*2]
@@ -698,27 +704,27 @@ when isMainModule:
     *list(size): inner
     u8: _ = 67
 
-  createParser(tert):
+  createParser(tert, tert_tuple):
     3: test[8]
 
-  createParser(ccsds_header):
+  createParser(ccsds_header, ccsds_header_tuple):
     u3: version
     u1: packet_type
     u1: secondary_header
     u11: apid
 
-  createParser(debug):
+  createParser(debug, d_tuple):
     u8: _ = 128
     u16: size
 
-  createParser(twoInts):
+  createParser(twoInts, two_int_tuple):
     8: first
     8: second
 
-  createParser(test):
+  createParser(test, test_tuple):
     *twoInts: fields[]
 
-  createParser(terminatedInts):
+  createParser(terminatedInts, terminated_int_tup):
     u32: myInts[]
 
   block parse:
@@ -755,4 +761,6 @@ when isMainModule:
     terminatedInts.put(ss3, outData)
     ss3.setPosition(0)
     echo terminatedInts.get(ss3)
+
+    echo type(outData)
 
