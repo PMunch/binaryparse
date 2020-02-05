@@ -677,7 +677,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     proc `writerName`(`stream`: Stream, `input`: var `tupleMeat`) =
       var `tmpVar`: int64 = 0
       `writer`
-    let `name` = (get: `readerName`, put: `writerName`)
+    let `name`* = (get: `readerName`, put: `writerName`)
   for p in extraParams:
     result[0][3].add p
 
