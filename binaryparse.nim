@@ -460,8 +460,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     let p = paramsAndDef[i]
     if p.kind != nnkExprColonExpr:
       raise newException(Defect, "Extra arguments must be colon expressions")
-    let s = parseStmt("proc hello(" & $p.toStrLit & ")")
-    extraParams.add(s[0][3][1])
+    extraParams.add(newIdentDefs(p[0], p[1]))
     inc i
   i = 0
   while i < body.len:
