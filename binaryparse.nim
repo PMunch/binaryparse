@@ -234,7 +234,7 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
       customProcRead.replace(seenFields)
       return (
         size: BiggestInt(0),
-        endian: system.cpuEndian,
+        endian: defaultEndian,
         kind: retType,
         customReader: customProcRead,
         customWriter: customProcWrite
