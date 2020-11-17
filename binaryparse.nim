@@ -199,8 +199,7 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
         kindPrefix = "float"
         size = typ[1..^1].parseBiggestInt
         if size != 32 and size != 64:
-          raise newException(AssertionError,
-            "Only 32 and 64 bit floats are supported")
+          raise newException(Defect, "Only 32 and 64 bit floats are supported")
       of 's':
         if typ.len != 1:
           size = typ[1..^1].parseBiggestInt
