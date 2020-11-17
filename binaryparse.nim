@@ -11,8 +11,8 @@
 ## Name       Description
 ## ---------- ------------------------------------------------------------------
 ## endian     This controls whether the bytes will be read with big or little
-##            endian convention. Possible values are ``le`` for little endian
-##            and ``be`` for big endian. If not specified then big endian is
+##            endian convention. Possible values are ``l`` for little endian
+##            and ``b`` for big endian. If not specified then big endian is
 ##            used.
 ## type       This is the type of value found in this field, if no type is
 ##            specified then it will be parsed as an integer. Supported types
