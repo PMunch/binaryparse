@@ -12,8 +12,8 @@
 ## ---------- ------------------------------------------------------------------
 ## endian     This controls whether the bytes will be read with big or little
 ##            endian convention. Possible values are ``le`` for little endian
-##            and ``be`` for big endian. If not specified the system.cpuEndian
-##            is used.
+##            and ``be`` for big endian. If not specified then big endian is
+##            used.
 ## type       This is the type of value found in this field, if no type is
 ##            specified then it will be parsed as an integer. Supported types
 ##            are ``u`` to get unsigned integers, ``f`` for floating point,
@@ -167,29 +167,32 @@ proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode = newId
 
 proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
   tuple[size: BiggestInt; endian: Endianness; kind, customReader, customWriter: NimNode] =
+  const defaultEndian = bigEndian
   var
     size: BiggestInt
     endian: Endianness
+    ensureIsByteMult: bool
     kindPrefix: string
     customReader, customWriter: NimNode
   case t.kind:
     of nnkIntLit:
       size = t.intVal
-      endian = system.cpuEndian
+      endian = defaultEndian
       kindPrefix = "int"
     of nnkIdent:
       var typ = t.strVal
 
-      if typ.len > 1:
-        case typ[0..1]
-        of "le":
-          endian = littleEndian
-          typ = typ[2..^1]
-        of "be":
-          endian = bigEndian
-          typ = typ[2..^1]
-        else:
-          endian = system.cpuEndian
+      case typ[0]
+      of 'l':
+        endian = littleEndian
+        ensureIsByteMult = true
+        typ.delete(0, 0)
+      of 'b':
+        endian = bigEndian
+        ensureIsByteMult = true
+        typ.delete(0, 0)
+      else:
+        endian = defaultEndian
 
       case typ[0]
       of 'u':
@@ -207,7 +210,7 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
           size = 0
         return (
           size: BiggestInt(size),
-          endian: system.cpuEndian,
+          endian: defaultEndian,
           kind: newIdentNode("string"),
           customReader: nil,
           customWriter: nil
@@ -242,6 +245,8 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
     raise newException(Defect, "Unable to parse values larger than 64 bits")
   if size == 0:
     raise newException(Defect, "Unable to parse values with size 0")
+  if ensureIsByteMult and size mod 8 != 0:
+    raise newException(Defect, "l/b is only valid for multiple-of-8 sizes")
   let containSize =
     if size > 32:
       64
@@ -734,40 +739,42 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
 
 when isMainModule:
   createParser(list, size: uint16):
-    beu8: _
-    beu8: data[size]
+    u8: _
+    u8: data[size]
 
   createParser(myParser):
-    beu8: _ = 128
-    beu16: size
-    be4: data[size*2]
+    u8: _ = 128
+    u16: size
+    4: data[size*2]
     s: str[]
     s: _ = "9xC\0"
     *list(size): inner
-    beu8: _ = 67
+    u8: _ = 67
+    bu16: _ = 258
+    lu16: _ = 513
 
   createParser(tert):
-    be3: test[8]
+    3: test[8]
 
   createParser(ccsds_header):
-    beu3: version
-    beu1: packet_type
-    beu1: secondary_header
-    beu11: apid
+    u3: version
+    u1: packet_type
+    u1: secondary_header
+    u11: apid
 
   createParser(debug):
-    beu8: _ = 128
-    beu16: size
+    u8: _ = 128
+    u16: size
 
   createParser(twoInts):
-    be8: first
-    be8: second
+    8: first
+    8: second
 
   createParser(test):
     *twoInts: fields[]
 
   createParser(terminatedInts):
-    beu32: myInts[]
+    u32: myInts[]
 
   block parse:
     var fs = newFileStream("data.hex", fmRead)
