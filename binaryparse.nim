@@ -2,7 +2,7 @@
 ## generated reads from a Stream and returns a tuple with each named field.
 ## The general format the macro takes is:
 ##
-## ``[type]<size>: <name>[options]``
+## ``[endian][type]<size>: <name>[options]``
 ##
 ## Where optional fields are in [] brackets and required fields are in <>
 ## brackets. Each field has separate meanings, as described in the table below:
@@ -10,6 +10,10 @@
 ## ========== ==================================================================
 ## Name       Description
 ## ---------- ------------------------------------------------------------------
+## endian     This controls whether the bytes will be read with big or little
+##            endian convention. Possible values are ``l`` for little endian
+##            and ``b`` for big endian. If not specified then big endian is
+##            used.
 ## type       This is the type of value found in this field, if no type is
 ##            specified then it will be parsed as an integer. Supported types
 ##            are ``u`` to get unsigned integers, ``f`` for floating point,
@@ -162,40 +166,60 @@ proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode = newId
 
 
 proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
-  tuple[size: BiggestInt, kind, customReader, customWriter: NimNode] =
+  tuple[size: BiggestInt; endian: Endianness; kind, customReader, customWriter: NimNode] =
+  const defaultEndian = bigEndian
   var
     size: BiggestInt
+    endian: Endianness
+    ensureIsByteMult: bool
     kindPrefix: string
     customReader, customWriter: NimNode
   case t.kind:
     of nnkIntLit:
       size = t.intVal
+      endian = defaultEndian
       kindPrefix = "int"
     of nnkIdent:
-      case (t.strVal)[0]:
-        of 'u':
-          size = (t.strVal)[1..^1].parseBiggestInt
-          kindPrefix = "uint"
-        of 'f':
-          size = (t.strVal)[1..^1].parseBiggestInt
-          kindPrefix = "float"
-          if size != 32 and size != 64:
-            raise newException(AssertionError,
-              "Only 32 and 64 bit floats are supported")
-        of 's':
-          if (t.strVal).len != 1:
-            size = (t.strVal)[1..^1].parseBiggestInt
-          else:
-            size = 0
-          return (
-            size: BiggestInt(size),
-            kind: newIdentNode("string"),
-            customReader: nil,
-            customWriter: nil
-          )
+      var typ = t.strVal
+
+      case typ[0]
+      of 'l':
+        endian = littleEndian
+        ensureIsByteMult = true
+        typ.delete(0, 0)
+      of 'b':
+        endian = bigEndian
+        ensureIsByteMult = true
+        typ.delete(0, 0)
+      else:
+        endian = defaultEndian
+
+      case typ[0]
+      of 'u':
+        kindPrefix = "uint"
+        size = typ[1..^1].parseBiggestInt
+      of 'f':
+        kindPrefix = "float"
+        size = typ[1..^1].parseBiggestInt
+        if size != 32 and size != 64:
+          raise newException(Defect, "Only 32 and 64 bit floats are supported")
+      of 's':
+        if typ.len != 1:
+          size = typ[1..^1].parseBiggestInt
         else:
-          raise newException(AssertionError,
-            "Format " & t.strVal & " not supported")
+          size = 0
+        return (
+          size: BiggestInt(size),
+          endian: defaultEndian,
+          kind: newIdentNode("string"),
+          customReader: nil,
+          customWriter: nil
+        )
+      else:
+        try: size = typ.parseBiggestInt
+        except ValueError:
+          raise newException(Defect, "Format " & t.strVal & " not supported")
+        kindPrefix = "int"
     of nnkCall:
       var
         t0 = t[0]
@@ -208,16 +232,21 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
         customProcRead.add(t[i])
         inc i
       customProcRead.replace(seenFields)
-      return (size: BiggestInt(0), kind: retType, customReader: customProcRead, customWriter: customProcWrite)
+      return (
+        size: BiggestInt(0),
+        endian: defaultEndian,
+        kind: retType,
+        customReader: customProcRead,
+        customWriter: customProcWrite
+      )
     else:
-      raise newException(AssertionError,
-        "Unknown kind: " & $t.kind)
+      raise newException(Defect, "Unknown kind: " & $t.kind)
   if size > 64:
-    raise newException(AssertionError,
-      "Unable to parse values larger than 64 bits")
+    raise newException(Defect, "Unable to parse values larger than 64 bits")
   if size == 0:
-    raise newException(AssertionError,
-      "Unable to parse values with size 0")
+    raise newException(Defect, "Unable to parse values with size 0")
+  if ensureIsByteMult and size mod 8 != 0:
+    raise newException(Defect, "l/b is only valid for multiple-of-8 sizes")
   let containSize =
     if size > 32:
       64
@@ -229,6 +258,7 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
       8
   return (
     size: size,
+    endian: endian,
     kind: newIdentNode(kindPrefix & $containSize),
     customReader: customReader,
     customWriter: customWriter
@@ -236,7 +266,7 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
 
 
 proc getBitInfo(size, offset: BiggestInt):
-  tuple[read, skip, shift , mask: BiggestInt] =
+  tuple[read, skip, shift, mask: BiggestInt] =
   result.read = (size+7) div 8
   result.skip = (size+offset) div 8
   result.shift = result.read*8 - size - offset
@@ -245,7 +275,7 @@ proc getBitInfo(size, offset: BiggestInt):
 
 proc createReadStatement(
   field: NimNode,
-  info: tuple[size: BiggestInt, kind, customReader, customWriter: NimNode],
+  info: tuple[size: BiggestInt; endian: Endianness; kind, customReader, customWriter: NimNode],
   offset: var BiggestInt, stream: NimNode): NimNode {.compileTime.} =
   let
     size = info.size
@@ -256,7 +286,7 @@ proc createReadStatement(
     )
   elif info.kind.kind == nnkIdent and info.kind.strVal == "string":
     if offset != 0:
-      raise newException(AssertionError, "Strings must be on byte boundry")
+      raise newException(Defect, "Strings must be on byte boundry")
     if size == 0:
       result = (quote do:
         `field` = ""
@@ -283,13 +313,25 @@ proc createReadStatement(
       read+=1
     result = newStmtList()
     if read == skip:
-      result.add(quote do:
-        `stream`.readDataBE(`field`.addr, `read`)
-      )
+      case info.endian
+      of littleEndian:
+        result.add(quote do:
+          `stream`.readDataLE(`field`.addr, `read`)
+        )
+      of bigEndian:
+        result.add(quote do:
+          `stream`.readDataBE(`field`.addr, `read`)
+        )
     else:
-      result.add(quote do:
-        `stream`.peekDataBE(`field`.addr, `read`)
-      )
+      case info.endian
+      of littleEndian:
+        result.add(quote do:
+          `stream`.peekDataLE(`field`.addr, `read`)
+        )
+      of bigEndian:
+        result.add(quote do:
+          `stream`.peekDataBE(`field`.addr, `read`)
+        )
     if skip != 0 and skip != read:
       result.add(quote do:
         `stream`.setPosition(`stream`.getPosition() + `skip`)
@@ -304,7 +346,7 @@ proc createReadStatement(
 
 proc createWriteStatement(
   field: NimNode,
-  info: tuple[size: BiggestInt, kind, customReader, customWriter: NimNode],
+  info: tuple[size: BiggestInt; endian: Endianness; kind, customReader, customWriter: NimNode],
   offset: var BiggestInt, stream: NimNode,
   tmpVar: NimNode = nil): NimNode {.compileTime.} =
   let
@@ -318,7 +360,7 @@ proc createWriteStatement(
     )
   elif info.kind.kind == nnkIdent and info.kind.strVal == "string":
     if offset != 0:
-      raise newException(AssertionError, "Strings must be on byte boundry")
+      raise newException(Defect, "Strings must be on byte boundry")
     if size == 0:
       result = (quote do:
         `stream`.write(`field`)
@@ -327,7 +369,7 @@ proc createWriteStatement(
       let fieldName = field.toStrLit
       result = (quote do:
         if `size` != `field`.len:
-          raise newException(AssertionError, "String " & `fieldName` & " of given size not matching")
+          raise newException(Defect, "String " & `fieldName` & " of given size not matching")
         `stream`.write(`field`)
       )
   else:
@@ -345,7 +387,7 @@ proc createWriteStatement(
     else:
       #[
       if tmpVar == nil:
-        raise newException(AssertionError, "tmpVar cannot be nil when size mod" &
+        raise newException(Defect, "tmpVar cannot be nil when size mod" &
           "8 != 0 and info.kind = " & $info.kind)
       ]#
       if tmpVar != nil:
@@ -364,14 +406,27 @@ proc createWriteStatement(
           )
       if skip != 0:
         if tmpVar != nil:
-          result.add(quote do:
-            `stream`.writeDataBE(`tmpVar`.addr, `skip`)
-            `tmpVar` = 0
-          )
+          case info.endian
+          of littleEndian:
+            result.add(quote do:
+              `stream`.writeDataLE(`tmpVar`.addr, `skip`)
+              `tmpVar` = 0
+            )
+          of bigEndian:
+            result.add(quote do:
+              `stream`.writeDataBE(`tmpVar`.addr, `skip`)
+              `tmpVar` = 0
+            )
         else:
-          result.add(quote do:
-            `stream`.writeDataBE(`field`.addr, `skip`)
-          )
+          case info.endian
+          of littleEndian:
+            result.add(quote do:
+              `stream`.writeDataLE(`field`.addr, `skip`)
+            )
+          of bigEndian:
+            result.add(quote do:
+              `stream`.writeDataBE(`field`.addr, `skip`)
+            )
           #[
       if offset + size > (offset + size) mod 8:
         result.add(quote do:
@@ -408,10 +463,8 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   while i < paramsAndDef.len - 1:
     let p = paramsAndDef[i]
     if p.kind != nnkExprColonExpr:
-      raise newException(AssertionError,
-        "Extra arguments must be colon expressions")
-    let s = parseStmt("proc hello(" & $p.toStrLit & ")")
-    extraParams.add(s[0][3][1])
+      raise newException(Defect, "Extra arguments must be colon expressions")
+    extraParams.add(newIdentDefs(p[0], p[1]))
     inc i
   i = 0
   while i < body.len:
@@ -538,7 +591,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
             else:
               (quote do:
                 if `size` != `x`.len:
-                  raise newException(AssertionError,
+                  raise newException(Defect,
                     "String for field of static length not right size"))
           else:
             newStmtList()
@@ -563,7 +616,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           if body.len > i+1:
             let endMagic = body[i+1]
             if endMagic[1][0].kind != nnkAsgn:
-              raise newException(AssertionError,
+              raise newException(Defect,
                 "Open arrays must be followed by magic for termination")
             let
               endInfo = decodeType(endMagic[0], stream, seenFields)
@@ -697,6 +750,8 @@ when isMainModule:
     s: _ = "9xC\0"
     *list(size): inner
     u8: _ = 67
+    bu16: _ = 258
+    lu16: _ = 513
 
   createParser(tert):
     3: test[8]
