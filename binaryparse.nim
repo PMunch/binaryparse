@@ -230,8 +230,10 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
         i = 1
       while i < t.len:
         customProcRead.add(t[i])
+        customProcWrite.add(t[i])
         inc i
       customProcRead.replace(seenFields)
+      customProcWrite.replace(seenFields)
       return (
         size: BiggestInt(0),
         endian: defaultEndian,
@@ -354,7 +356,7 @@ proc createWriteStatement(
     kind = info.kind
     custom = info.customWriter
   if custom != nil:
-    custom.add(field)
+    custom.insert(2, field)
     result = (quote do:
       `custom`
     )
@@ -733,6 +735,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     let `name` = (get: `readerName`, put: `writerName`)
   for p in extraParams:
     result[0][3].add p
+    result[1][3].add p
 
   when defined(binaryparseEcho):
     echo result.toStrLit
