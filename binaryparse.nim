@@ -106,7 +106,7 @@ import streams
 import strutils
 
 type
-  MagicError* = object of Exception
+  MagicError* = object of Defect
     ## Error raised from the parser procedure when a magic sequence is not
     ## matching the specified value.
 
@@ -152,7 +152,7 @@ template peekDataLE*(stream: Stream, buffer: pointer, size: int) =
       raise newException(IOError,
         "Unable to peek the requested amount of bytes from file")
 
-proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode = newIdentNode("result")) =
+proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode) =
   if node.kind == nnkIdent:
     if node.strVal in seenFields:
       node = newDotExpr(parent, node)
@@ -232,8 +232,8 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
         customProcRead.add(t[i])
         customProcWrite.add(t[i])
         inc i
-      customProcRead.replace(seenFields)
-      customProcWrite.replace(seenFields)
+      customProcRead.replace(seenFields, newIdentNode("result"))
+      customProcWrite.replace(seenFields, newIdentNode("input"))
       return (
         size: BiggestInt(0),
         endian: defaultEndian,
@@ -606,7 +606,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
         )
         if def[1][0].len == 2:
           var readFields = def[1][0][1].copyNimTree
-          readFields.replace(seenFields)
+          readFields.replace(seenFields, res)
           inner.add(quote do:
             `res`[`field`] = newSeq[`kind`](`readFields`)
             var `iiRead` = 0
@@ -735,7 +735,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     let `name` = (get: `readerName`, put: `writerName`)
   for p in extraParams:
     result[0][3].add p
-    result[1][3].add p
+    result[1][3].add p.copyNimTree
 
   when defined(binaryparseEcho):
     echo result.toStrLit
