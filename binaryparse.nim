@@ -229,8 +229,11 @@ proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
           typeGetter(`t0`)
         i = 1
       while i < t.len:
-        customProcRead.add(t[i])
-        customProcWrite.add(t[i])
+        var
+          readArg = t[i].copyNimTree
+          writeArg = t[i].copyNimTree
+        customProcRead.add(readArg)
+        customProcWrite.add(writeArg)
         inc i
       customProcRead.replace(seenFields, newIdentNode("result"))
       customProcWrite.replace(seenFields, newIdentNode("input"))
