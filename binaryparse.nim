@@ -120,11 +120,12 @@
 ##       16: y
 ##     createParser(myParser):
 ##       8: size = 4
-##       *inner: fixed(8*size)
+##       *inner: fixed(size)
 ##
-## In the above example, ``size`` bits (32 in this case) will be read from the main ``BitStream``.
+## In the above example, ``size`` bytes (4 in this case) will be read from the main ``BitStream``.
 ## Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
-## Since ``inner`` will only use 24 of them, the remaining 8 bits will effectively be discarded.
+## Since ``inner`` will only use 3 of them, the remaining 1 will effectively be discarded.
+## Note that unlike in ``Type``, here size is in counted bytes.
 ##
 ## Alignment
 ## ~~~~~~~~~
