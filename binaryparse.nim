@@ -13,11 +13,11 @@
 ## 
 ## Each specified option must be in the form ``option = value``:
 ## 
-## - ``endian``: sets the default endianness for the whole parser
+## - ``endian``: sets the default byte endianness for the whole parser
 ##    - *default*: big endian
 ##    - ``b``: **big** endian
 ##    - ``l``: **little** endian
-## - ``bitEndian``: sets the default bit-endianness for the whole parser
+## - ``bitEndian``: sets the default bit endianness for the whole parser
 ##    - *default*: left -> right
 ##    - ``n``: left -> right (**normal**)
 ##    - ``r``: left <- right (**reverse**)
@@ -52,11 +52,11 @@
 ##    - ``f``: **float**
 ##    - ``s``:**string**
 ##    - ``*``: complex (see below)
-## - 1 optional letter specifying endianness:
+## - 1 optional letter specifying byte endianness:
 ##    - *default*: big endian
 ##    - ``b``: **big** endian
 ##    - ``l``: **little** endian
-## - 1 optional letter specifying big-endianness for unaligned reads:
+## - 1 optional letter specifying bit endianness for unaligned reads:
 ##    - *default*: left -> right
 ##    - ``n``: left -> right (**normal**)
 ##    - ``r``: left <- right (**reverse**)
@@ -95,26 +95,18 @@
 ##       6: x
 ##       s: y # invalid, generates an exception
 ## 
-## | Endian only refers to aligned reads, while bit-endian only refers to unaligned reads.
-## | When reading unaligned data, you should always ensure that bit-endian is uniform between **byte boundaries**.
-## | Your spec must finish on a byte boundary.
+## If any of the following is violated, binaryparse should generate an exception:
 ## 
+## - Byte endianness can only be used with byte-multiple integers.
+## - Bit endianness must be uniform between **byte boundaries**.
+## - Spec must finish on a byte boundary.
+##
 ## .. code:: nim
-## 
-##     createParser(myParser, bitEndian = n):
-##       2: a
-##       16: b # n/r will be considered; l/b is irrelevant
-##       r6: c # undefined behavior: shares bits with previous byte
-##       16: d # l/b will be considered; n/r is irrelevant
-##       10: e # undefined behavior: spec does not finish on a byte boundary
-## 
-## -  When using an irrelevant option, binaryparse should generate a
-##    **warning**
-## -  When switching bit-endian between 2 unaligned reads binaryparse
-##    should generate an **exception**
-## -  When spec does not end on a byte boundary, binaryparse should
-##    either generate an **exception** or pad the last byte with
-##    zeros and generate a **warning**
+##
+##    createParser(myParser, bitEndian = n):
+##      b9: a # error: cannot apply byte endianness
+##      r6: b # error: shares bits with previous byte
+##      10: c # error: spec does not finish on a byte boundary
 ## 
 ## Repetition
 ## ~~~~~~~~~~
@@ -371,7 +363,7 @@ proc decodeType(t, bs: NimNode; seenFields, params: seq[string]; opts: Options):
           kind = kS
       of 'l', 'b':
         if letters * {'l', 'b'} != {}:
-          raise newException(Defect, "Endian was specified more than once")
+          raise newException(Defect, "Endianness was specified more than once")
         ensureIsByteMult = true
         if c == 'b':
           endian = bigEndian
@@ -379,7 +371,8 @@ proc decodeType(t, bs: NimNode; seenFields, params: seq[string]; opts: Options):
           endian = littleEndian
       of 'n', 'r':
         if letters * {'n', 'r'} != {}:
-          raise newException(Defect, "Bit endian was specified more than once")
+          raise newException(Defect,
+            "Bit endianness was specified more than once")
         if c == 'n':
           bitEndian = bigEndian
         else:
@@ -467,9 +460,10 @@ proc createReadStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
     size = typ.size
     sizeNode = newLit(size.int)
     endian = if typ.endian == littleEndian: 'l' else: 'b'
+    endianNode = newLit(typ.endian)
     bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
     procUnaligned = ident("readbits" & bitEndian & "e")
-    procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`)
+    procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`, `endianNode`)
   case kind
   of kI, kU:
     if size in {8, 16, 32, 64}:
@@ -519,6 +513,7 @@ proc createWriteStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} 
     sizeNode = newLit(size.int)
     lenNode = newLit(size.int div 8)
     endian = if typ.endian == littleEndian: 'l' else: 'b'
+    endianNode = newLit(typ.endian)
     bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
   case kind
   of kI, kU, kF:
@@ -536,9 +531,9 @@ proc createWriteStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} 
           if isAligned(`bs`):
             `procAligned`(`bs`, `impl`(`tmp`))
           else:
-            `procUnaligned`(`bs`, `sizeNode`, `tmp`))
+            `procUnaligned`(`bs`, `sizeNode`, `tmp`, `endianNode`))
       else:
-        result.add(quote do: `procUnaligned`(`bs`, `sizeNode`, `tmp`))
+        result.add(quote do: `procUnaligned`(`bs`, `sizeNode`, `tmp`, `endianNode`))
   of kS:
     if size == 0 and sym == nil:
       raise newException(Defect,

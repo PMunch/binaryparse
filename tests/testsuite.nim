@@ -43,7 +43,7 @@ suite "Unaligned":
     r12: d
     r20: e
     7: f
-    64: g
+    l64: g
     57: h
 
   var fbs = newFileBitStream("tests/unaligned.hex")

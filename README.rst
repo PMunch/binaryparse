@@ -15,11 +15,11 @@ Parser options
 
 Each specified option must be in the form ``option = value``:
 
-- ``endian``: sets the default endianness for the whole parser
+- ``endian``: sets the default byte endianness for the whole parser
    - *default*: big endian
    - ``b``: **big** endian
    - ``l``: **little** endian
-- ``bitEndian``: sets the default bit-endianness for the whole parser
+- ``bitEndian``: sets the default bit endianness for the whole parser
    - *default*: left -> right
    - ``n``: left -> right (**normal**)
    - ``r``: left <- right (**reverse**)
@@ -54,11 +54,11 @@ made up of:
    - ``f``: **float**
    - ``s``:**string**
    - ``*``: complex (see below)
-- 1 optional letter specifying endianness:
+- 1 optional letter specifying byte endianness:
    - *default*: big endian
    - ``b``: **big** endian
    - ``l``: **little** endian
-- 1 optional letter specifying big-endianness for unaligned reads:
+- 1 optional letter specifying bit endianness for unaligned reads:
    - *default*: left -> right
    - ``n``: left -> right (**normal**)
    - ``r``: left <- right (**reverse**)
@@ -97,26 +97,18 @@ Currently unaligned reads for strings are not supported:
       6: x
       s: y # invalid, generates an exception
 
-| Endian only refers to aligned reads, while bit-endian only refers to unaligned reads.
-| When reading unaligned data, you should always ensure that bit-endian is uniform between **byte boundaries**.
-| Your spec must finish on a byte boundary.
+If any of the following is violated, binaryparse should generate an exception:
+
+- Byte endianness can only be used with byte-multiple integers.
+- Bit endianness must be uniform between **byte boundaries**.
+- Spec must finish on a byte boundary.
 
 .. code:: nim
 
-    createParser(myParser, bitEndian = n):
-      2: a
-      16: b # n/r will be considered; l/b is irrelevant
-      r6: c # undefined behavior: shares bits with previous byte
-      16: d # l/b will be considered; n/r is irrelevant
-      10: e # undefined behavior: spec does not finish on a byte boundary
-
--  When using an irrelevant option, binaryparse should generate a
-   **warning**
--  When switching bit-endian between 2 unaligned reads binaryparse
-   should generate an **exception**
--  When spec does not end on a byte boundary, binaryparse should
-   either generate an **exception** or pad the last byte with
-   zeros and generate a **warning**
+   createParser(myParser, bitEndian = n):
+     b9: a # error: cannot apply byte endianness
+     r6: b # error: shares bits with previous byte
+     10: c # error: spec does not finish on a byte boundary
 
 Repetition
 ~~~~~~~~~~
