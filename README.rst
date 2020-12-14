@@ -52,7 +52,7 @@ made up of:
    - *default*: signed integer
    - ``u``: **unsigned** integer
    - ``f``: **float**
-   - ``s``:**string**
+   - ``s``: **string**
    - ``*``: complex (see below)
 - 1 optional letter specifying byte endianness:
    - *default*: big endian
@@ -63,19 +63,22 @@ made up of:
    - ``n``: left -> right (**normal**)
    - ``r``: left <- right (**reverse**)
 - 1 number specifying size in **bits**:
-   - for strings only byte multiples are allows (``8``, ``16``, ``24``, ...)
+   - for a string it refers to the size of each individual and defaults to ``8``
    - for an integer the allowed values are ``1 .. 64``
    - for a float the allowed values are ``32`` and ``64``
    - for a custom it can't be used (use the secondary ``size`` operation)
 
-| Strings may not have a size, in which case they are null-terminated.
-| You can order options however you want, but size must come last (e.g. ``lru16`` and ``url16`` are valid but not ``16lru``).
+You can order options however you want, but size must come last (e.g. ``lru16`` and ``url16`` are valid but not ``16lru``).
 
 Value
 ~~~~~
 
-This section consists of a mandatory name for the field + optional
-repetition + optional assertion.
+This section consists of a the following attributes in order:
+
+- **name** for the field (mandatory)
+- substream **size** (optional)
+- **repetition** (optional)
+- **assertion** optional)
 
 For primitive types (except null-terminated strings) you can instruct
 binaryparse to not produce a symbol and discard the field by using ``_``
@@ -84,7 +87,46 @@ for the name:
 .. code:: nim
 
     createParser(magic):
-      s: _ = "GIF89a"
+      8: _
+
+Strings
+~~~~~~~
+
+You can use call syntax to specify length or an assertion to specify an exact expected value (see below),
+otherwise strings they are null-terminated:
+
+.. code:: nim
+
+    s: s(5) # a string of length 5
+    s: term # a null-terminated string
+    s: _ = "MAGIC" # a string that must match the value "MAGIC"
+    s: m() # a string that is terminated when a value matches the next field
+    16: x = 0xABCD
+    s: arr1[5] # a seq of 5 null-terminated strings
+    s: arr2(4)[5] # a seq of 5 strings each one of which has length 4
+    s: arr3[] # a seq of null-terminated strings until next field is matched
+    16: _ = x + 3
+    s: arr4(x)[] # a seq of strings of length x until next field is matched
+    f32: _ = 2.5
+
+## Substream
+~~~~~~~~~
+
+The call syntax described in the previous section in not limited to strings.
+In fact, it more generally indicates the creation of a **substream**:
+
+.. code:: nim
+
+    createParser(inner):
+      8: x
+      16: y
+    createParser(myParser):
+      8: size = 4
+      *inner: fixed(4*size)
+
+In the above example, ``size`` bits (32 in this case) will be read from the main ``BitStream``.
+Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
+Since ``inner`` will only use 24 of them, the remaining 8 bits will effectively be discarded.
 
 Alignment
 ~~~~~~~~~
@@ -110,31 +152,6 @@ If any of the following is violated, binaryparse should generate an exception:
      r6: b # error: shares bits with previous byte
      10: c # error: spec does not finish on a byte boundary
 
-Repetition
-~~~~~~~~~~
-
-There are 2 ways to produce a ``seq`` of your ``Type``:
-
-- ``for repetition``: append ``[expr]`` to the name for repeating ``expr``
-  times
-- ``until repetition``: append ``{expr}`` to the name for repeating until
-  ``expr`` is evaluated to ``true``
-
-In until repetition you can use 3 special symbols:
-
-- ``e``: means 'last element read'
-- ``i``: means 'current loop index'
-- ``s``: means 'stream'
-
-.. code:: nim
-
-    u8: a{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
-
-.. code:: nim
-
-    16: x[5] # seq[int16] of size 5
-    16: y{s.atEnd} # seq[int16] until end of stream
-
 Assertion
 ~~~~~~~~~
 
@@ -147,6 +164,32 @@ Example:
 
     s: x = "binaryparse is awesome"
     8: y[5] = @[0, 1, 2, 3, 4]
+
+Repetition
+~~~~~~~~~~
+
+There are 3 ways to produce a ``seq`` of your ``Type``:
+
+- ``for``: append ``[expr]`` to the name for repeating ``expr``
+  times
+- ``until``: append ``{expr}`` to the name for repeating until
+  ``expr`` is evaluated to ``true``
+- ``magic``: append ``[]`` to the name and use assertion with
+  your **next** field
+
+In until repetition you can use 3 special symbols:
+
+- ``e``: means 'last element read'
+- ``i``: means 'current loop index'
+- ``s``: means 'stream'
+
+.. code:: nim
+
+    16: a[5] # seq[int16] of size 5
+    u8: b{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
+    s: str[] # reads chars into a string until next field is matched
+    3: _ = 0b111 # magic value is discarded
+    16: c{s.atEnd} # seq[int16] until end of stream
 
 Complex types
 ~~~~~~~~~~~~~
@@ -239,7 +282,6 @@ sequence (not each individual element).
 Special notes
 ~~~~~~~~~~~~~
 
-- Strings are always read from left to right regardless of endian
 - Nim expressions may contain:
    - a previously defined field
    - a parser parameter
