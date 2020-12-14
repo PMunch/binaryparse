@@ -1,11 +1,9 @@
 # Package
-
 version       = "0.2.3"
-author        = "Peter Munch-Ellingsen"
-description   = "Binary parser (and writer) in pure Nim. Generates efficient parsing procedures that handle many commonly seen patterns seen in binary files and does sub-byte field reading."
+author        = "Peter Munch-Ellingsen & Stefanos Mandalas"
+description   = "Binary parser/encoder DSL"
 license       = "MIT"
 
 # Dependencies
-
 requires "nim >= 0.19.0"
-
+requires "bitstreams"

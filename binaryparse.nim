@@ -1,819 +1,784 @@
-## This module implements a macro to create binary parsers. The parsers
-## generated reads from a Stream and returns a tuple with each named field.
-## The general format the macro takes is:
-##
-## ``[endian][type]<size>: <name>[options]``
-##
-## Where optional fields are in [] brackets and required fields are in <>
-## brackets. Each field has separate meanings, as described in the table below:
-##
-## ========== ==================================================================
-## Name       Description
-## ---------- ------------------------------------------------------------------
-## endian     This controls whether the bytes will be read with big or little
-##            endian convention. Possible values are ``l`` for little endian
-##            and ``b`` for big endian. If not specified then big endian is
-##            used.
-## type       This is the type of value found in this field, if no type is
-##            specified then it will be parsed as an integer. Supported types
-##            are ``u`` to get unsigned integers, ``f`` for floating point,
-##            ``s`` for strings, and ``*`` for custom parser.
-## size       The size, in *bits*, of the field to read. For uint and int values
-##            from 1 to 64 inclusive are supported. For floats only 32 and 64
-##            are supported. Strings use this field to specify the amount of
-##            characters to read into the string. If they don't specify a size
-##            they will be read to the first NULL byte (this only applies to
-##            strings). When the custom parser type is specified the size field
-##            is used to name the custom parser procedure.
-## name       The name of the value, this will be used as the name in the
-##            resulting tuple. If the value doesn't need to be stored one can
-##            use ``_`` as the name and it will not get a field in the result.
-## options    These will change the regular behaviour of reading into a field.
-##            Since they are so different in what they do they are described
-##            below instead of in this table.
-## ========== ==================================================================
-##
-## Many binary formats include special "magic" sequences to identify the file
-## or regions within it. The option ``= <value>`` can be used to check if a
-## field has a certain value. If the value doesn't match a MagicError is
-## raised. Value must match the value of the field it checks. When the field is
-## a string type the exact length of the magic string is read, to include a
-## terminating NULL byte use ``\0`` in the string literal.
-##
-## To read more fields of a certain kind into a sequence you can use the option
-## ``[[count]]`` (that is square brackets with an optional count inside). If no
-## count is specified and the brackets left empty it must be the last field or
-## the next field needs to be a magic number and will be used to terminate the
-## sequence. If it is the last field it will read until the end of the stream.
-## As count you can use the name of any previous field, literals, previously
-## defined variables, or a combination. Note that all sequences are assumed to
-## terminate on a byte border, even if given a statically evaluatable size.
-##
-## Another thing commonly found in binary formats are repeating blocks or
-## formats within the format. These can be read by using a custom parser.
-## Custom parsers technically supports any procedure that takes a Stream as the
-## first argument, however care must be taken to leave the Stream in the correct
-## position. You can also define the inner format with a parser from this module
-## and then pass that parser to the outer parser. This means that you can easily
-## nest parsers. If you need values from the outer parser you can add parameters
-## to the inner parser by giving it colon expressions before the body (e.g the
-## call ``createParser(list, size: uint16)`` would create a parser
-## ``proc (stream: Stream, size: uint16): <return type>``). To call a parser
-## use the ``*`` type as described above and give it the name of the parser and
-## any optional arguments. The stream object will get added automatically as the
-## first parameter.
-##
-## When creating a parser you get a tuple with two members, ``get`` and ``put``
-## which is stored by a let as the identifier given when calling createParser.
-## These are both procedures, the first only takes a stream (and any optional
-## arguments as described above) and returns a tuple containing all the fields.
-## The second takes a stream and a tuple containing all the fields, this is the
-## same tuple returned by the ``get`` procedure and writes the format to the
-## stream.
-##
+## This module implements a DSL for creating binary parsers/encoders.
+## It exports the macro ``createParser`` which generates a ``tuple[get: proc, put: proc]``.
+## ``get`` returns a tuple with each parsed field and ``put`` writes a compatible tuple to the stream.
+## 
+## The macro accepts 3 kind of things:
+## 
+## -  Parser options
+## -  Parser parameters
+## -  Block with DSL statements
+## 
+## Parser options
+## --------------
+## 
+## Each specified option must be in the form ``option = value``:
+## 
+## - ``endian``: sets the default endianness for the whole parser
+##    - *default*: big endian
+##    - ``b``: **big** endian
+##    - ``l``: **little** endian
+## - ``bitEndian``: sets the default bit-endianness for the whole parser
+##    - *default*: left -> right
+##    - ``n``: left -> right (**normal**)
+##    - ``r``: left <- right (**reverse**)
+## 
+## Parser parameters
+## -----------------
+## 
+## Each parameter must be in the form ``symbol: type``. The generated
+## ``get``/``put`` procs will then have this additional parameter appended.
+## 
+## DSL
+## ----
+## 
+## Each statement corresponds to 1 field. The general syntax is:
+## 
+## .. code:: nim
+## 
+##     Type {Operations}: Value
+## 
+## where ``{Operations}`` is optional and refers to a plugin system (see
+## below).
+## 
+## Type
+## ~~~~
+## 
+## The **kind**, **endianness** and **size** are encoded in a identifier
+## made up of:
+## 
+## - 1 optional letter specifying the kind:
+##    - *default*: signed integer
+##    - ``u``: **unsigned** integer
+##    - ``f``: **float**
+##    - ``s``:**string**
+##    - ``*``: complex (see below)
+## - 1 optional letter specifying endianness:
+##    - *default*: big endian
+##    - ``b``: **big** endian
+##    - ``l``: **little** endian
+## - 1 optional letter specifying big-endianness for unaligned reads:
+##    - *default*: left -> right
+##    - ``n``: left -> right (**normal**)
+##    - ``r``: left <- right (**reverse**)
+## - 1 number specifying size in **bits**:
+##    - for strings only byte multiples are allows (``8``, ``16``, ``24``, ...)
+##    - for an integer the allowed values are ``1 .. 64``
+##    - for a float the allowed values are ``32`` and ``64``
+##    - for a custom it can't be used (use the secondary ``size`` operation)
+## 
+## | Strings may not have a size, in which case they are null-terminated.
+## | You can order options however you want, but size must come last (e.g. ``lru16`` and ``url16`` are valid but not ``16lru``).
+## 
+## Value
+## ~~~~~
+## 
+## This section consists of a mandatory name for the field + optional
+## repetition + optional assertion.
+## 
+## For primitive types (except null-terminated strings) you can instruct
+## binaryparse to not produce a symbol and discard the field by using ``_``
+## for the name:
+## 
+## .. code:: nim
+## 
+##     createParser(magic):
+##       s: _ = "GIF89a"
+## 
+## Alignment
+## ~~~~~~~~~
+## 
+## Currently unaligned reads for strings are not supported:
+## 
+## .. code:: nim
+## 
+##     createParser(myParser):
+##       6: x
+##       s: y # invalid, generates an exception
+## 
+## | Endian only refers to aligned reads, while bit-endian only refers to unaligned reads.
+## | When reading unaligned data, you should always ensure that bit-endian is uniform between **byte boundaries**.
+## | Your spec must finish on a byte boundary.
+## 
+## .. code:: nim
+## 
+##     createParser(myParser, bitEndian = n):
+##       2: a
+##       16: b # n/r will be considered; l/b is irrelevant
+##       r6: c # undefined behavior: shares bits with previous byte
+##       16: d # l/b will be considered; n/r is irrelevant
+##       10: e # undefined behavior: spec does not finish on a byte boundary
+## 
+## -  When using an irrelevant option, binaryparse should generate a
+##    **warning**
+## -  When switching bit-endian between 2 unaligned reads binaryparse
+##    should generate an **exception**
+## -  When spec does not end on a byte boundary, binaryparse should
+##    either generate an **exception** or pad the last byte with
+##    zeros and generate a **warning**
+## 
+## Repetition
+## ~~~~~~~~~~
+## 
+## There are 2 ways to produce a ``seq`` of your ``Type``:
+## 
+## - ``for repetition``: append ``[expr]`` to the name for repeating ``expr``
+##   times
+## - ``until repetition``: append ``{expr}`` to the name for repeating until
+##   ``expr`` is evaluated to ``true``
+## 
+## In until repetition you can use 3 special symbols:
+## 
+## - ``e``: means 'last element read'
+## - ``i``: means 'current loop index'
+## - ``s``: means 'stream'
+## 
+## .. code:: nim
+## 
+##     u8: a{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
+## 
+## .. code:: nim
+## 
+##     16: x[5] # seq[int16] of size 5
+##     16: y{s.atEnd} # seq[int16] until end of stream
+## 
+## Assertion
+## ~~~~~~~~~
+## 
+## Use ``= expr`` for producing an exception if the parsed value doesn't
+## match ``expr``.
+## 
 ## Example:
-## In lieu of proper examples the binaryparse.nim file contains a ``when
-## isMainModule()`` block showcasing how it can be used. The table below
-## describes that block in a bit more detail:
+## 
+## .. code:: nim
+## 
+##     s: x = "binaryparse is awesome"
+##     8: y[5] = @[0, 1, 2, 3, 4]
+## 
+## Complex types
+## ~~~~~~~~~~~~~
+## 
+## Instead of the described identifier for specifying ``Type``, you can
+## call a previously defined parser by using ``*`` followed by the name of
+## the parser. If your parser is parametric you must pass arguments to it
+## with standard call syntax.
+## 
+## Example:
+## 
+## .. code:: nim
+## 
+##     createParser(inner):
+##       32: a
+##       32: b
+## 
+##     createParser(innerWithArgs, size: int32):
+##       32: a
+##       32: b[size]
+## 
+##     createParser(outer):
+##       *inner: x
+##       *innerWithArgs(x.a): y
 ##
-## ======================= =====================================================
-## Format                  Description
-## ----------------------- -----------------------------------------------------
-## ``u8: _ = 128``         Reads an unsigned 8-bit integer and checks if it
-##                         equals 128 without storing the value as a field in
-##                         returned tuple
-## ``u16: size``           Reads an unsigned 16-bit integer and names it
-##                         ``size`` in the returned tuple
-## ``4: data[size*2]``     Reads a sequence of 4-bit integers into a ``data``
-##                         field in the returned tuple. Size is the value read
-##                         above, and denotes the count of integers to read.
-## ``s: str[]``            Reads null terminated strings into a ``str`` field in
-##                         the returned tuple. Since it's given empty brackets
-##                         the next field needs to be a magic field and the
-##                         sequence will be read until the magic is found.
-## ``s: _ = "9xC\0"``      Reads a non-null terminated string and checks if it
-##                         equals the magic sequence.
-## ``*list(size): inner``  Uses a pre-defined procedure ``list`` which is called
-##                         with the current Stream and the ``size`` read
-##                         earlier. Stores the return value in a field ``inner``
-##                         in the returned tuple.
-## ``u8: _ = 67``          Reads an unsigned 8-bit integer and checks if it
-##                         equals 67 without storing the value.
-## ======================= =====================================================
+## Custom parser API
+## ~~~~~~~~~~~~~~~~~
+##
+## Since a binaryparse parser is just a ``tuple[get: proc, set: proc]``,
+## you can write parsers by hand that are compatible with the DSL. Just be
+## sure that ``get`` and ``set`` have a proper signature:
+## 
+## .. code:: nim
+## 
+##     type parserTy = tuple[...]
+##     proc get(s: BitStream): parserTy
+##     proc put(s: BitStream, input: parserTy)
+##     let parser = (get: get, put: put)
+## 
+## If you want your custom parser to be parametric, simply append more
+## parameters to your procs. These extra parameters must be identical and
+## in the same order in the two procs.
+## 
+## Example:
+## 
+## .. code:: nim
+## 
+##     type parserTy = tuple[...]
+##     proc get(s: BitStream, x: int, y: float): parserTy
+##     proc put(s: BitStream, input: parserTy, x: int, y: float)
+##     let parser = (get: get, put: put)
+## 
+## Operations (plugins)
+## ~~~~~~~~~~~~~~~~~~~~
+## 
+## Plugins are **user-defined** keys which define an operation on a field.
+## They are parametric, which means they also have a value. The API for
+## writing plugins is not designed yet, but the syntax for using them is:
+## 
+## .. code:: nim
+## 
+##     Type {plugin: expr}: Value
+## 
+## Examples of plugins
+## ~~~~~~~~~~~~~~~~~~~
+## 
+## - ``pos``: positions the ``stream`` at byte ``value`` before parsing and then
+##   resets it to the previous position
+## - ``cond``: wraps the field into an ``Option`` type and will only parse it if
+##   ``value`` is evaluated to ``true``
+## - ``size``: reads ``value`` bytes from the stream and creates a *substream*
+## 
+## You can combine multiple operations which will be applied to the field
+## in the specified order:
+## 
+## .. code:: nim
+## 
+##     8: shouldParse
+##     16 {cond: shouldParse.bool, size: 4}: x
+## 
+## First ``shouldParse.bool`` will be evaluted. If it's ``false``, parsing
+## won't happen; if it's true, then 4 bytes will be read from the stream
+## and a substream with them will be created. Then, 16 bits will be read
+## from this substeam. Finally, these bits will be wrapped into an
+## ``Option`` and the resulting field will be an Option[int16].
+## 
+## When you produce a sequence, ``Operations`` apply to **the whole**
+## sequence (not each individual element).
+## 
+## Special notes
+## ~~~~~~~~~~~~~
+##
+## - Strings are always read from left to right regardless of endian
+## - Nim expressions may contain:
+##    - a previously defined field
+##    - a parser parameter
+##    - the ``e`` symbol if it's a repetition until expression
+##    - the ``i`` symbol if it's a repetition until expression
+##    - the ``s`` symbol if it's a repetition until or assertion expression
+## 
+## These last 3 symbols might conflict with your variables or fields, so you
+## shouldn't use them for something else.
+## 
 
-import macros
-import streams
-import strutils
+import macros, tables, strutils, strformat
+import bitstreams
 
 type
   MagicError* = object of Defect
     ## Error raised from the parser procedure when a magic sequence is not
     ## matching the specified value.
+  Options = tuple
+    endian: Endianness
+    bitEndian: Endianness
+  OptionSet = enum
+    osEndian
+    osBitEndian
+  Kind = enum
+    kI, kU, kF, kS, kC
+  Type = tuple
+    kind: Kind
+    impl: NimNode
+    customReader: NimNode
+    customWriter: NimNode
+    size: BiggestInt
+    endian: Endianness
+    bitEndian: Endianness
+  Operations = OrderedTable[string, NimNode]
+  Repeat = enum
+    rNo
+    rFor
+    rUntil
+  Value = ref object
+    name: string
+    case repeat: Repeat
+    of rFor, rUntil: repeatExpr: NimNode
+    of rNo: discard
+    value: NimNode
+
+const defaultOptions: Options = (
+  endian: bigEndian,
+  bitEndian: bigEndian)
 
 macro typeGetter*(body: typed): untyped =
   ## Helper macro to get the return type of custom parsers
   body.getTypeImpl[0][1][0][0]
 
-template writeDataBE*(stream: Stream, buffer: pointer, size: int) =
-  for i in 0..<size:
-    let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
-    stream.writeData(tmp, 1)
+proc syntaxError() = raise newException(Defect, "Invalid syntax")
 
-template writeDataLE*(stream: Stream, buffer: pointer, size: int) =
-  for i in 0..<size:
-    let tmp = cast[pointer](cast[int](buffer) + i)
-    stream.writeData(tmp, 1)
-
-template readDataBE*(stream: Stream, buffer: pointer, size: int) =
-  for i in 0..<size:
-    let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
-    if stream.readData(tmp, 1) != 1:
-      raise newException(IOError,
-        "Unable to read the requested amount of bytes from file")
-
-template readDataLE*(stream: Stream, buffer: pointer, size: int) =
-  for i in 0..<size:
-    let tmp = cast[pointer](cast[int](buffer) + i)
-    if stream.readData(tmp, 1) != 1:
-      raise newException(IOError,
-        "Unable to read the requested amount of bytes from file")
-
-template peekDataBE*(stream: Stream, buffer: pointer, size: int) =
-  for i in 0..<size:
-    let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
-    if stream.peekData(tmp, 1) != 1:
-      raise newException(IOError,
-        "Unable to peek the requested amount of bytes from file")
-
-template peekDataLE*(stream: Stream, buffer: pointer, size: int) =
-  for i in 0..<size:
-    let tmp = cast[pointer](cast[int](buffer) + i)
-    if stream.peekData(tmp, 1) != 1:
-      raise newException(IOError,
-        "Unable to peek the requested amount of bytes from file")
-
-proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode) =
+proc prefixFields(node: var NimNode, seenFields, params: seq[string], parent: NimNode) =
   if node.kind == nnkIdent:
     if node.strVal in seenFields:
       node = newDotExpr(parent, node)
+  elif node.kind == nnkDotExpr and node[0].strVal in params:
+    return
   else:
     var i = 0
     while i < len(node):
       var n = node[i]
-      n.replace(seenFields, parent)
+      prefixFields(n, seenFields, params, parent)
+      node[i] = n.copyNimTree
+      inc i
+
+proc replaceWith(node: var NimNode; what, with: NimNode) =
+  if node.kind == nnkIdent:
+    if eqIdent(node, what):
+      node = with
+  else:
+    var i = 0
+    while i < len(node):
+      var n = node[i]
+      n.replaceWith(what, with)
       node[i] = n
       inc i
 
+proc containSize(size: BiggestInt): string =
+  if size == 0: ""
+  elif size > 32: "64"
+  elif size > 16: "32"
+  elif size > 8: "16"
+  else: "8"
 
-proc decodeType(t: NimNode, stream: NimNode, seenFields: seq[string]):
-  tuple[size: BiggestInt; endian: Endianness; kind, customReader, customWriter: NimNode] =
-  const defaultEndian = bigEndian
+proc decodeType(t, bs: NimNode; seenFields, params: seq[string]; opts: Options): Type =
   var
+    kind: Kind
+    impl: NimNode
     size: BiggestInt
-    endian: Endianness
-    ensureIsByteMult: bool
-    kindPrefix: string
+    endian = opts.endian
+    bitEndian = opts.bitEndian
     customReader, customWriter: NimNode
-  case t.kind:
-    of nnkIntLit:
-      size = t.intVal
-      endian = defaultEndian
+    ensureIsByteMult: bool
+  case t.kind
+  of nnkIntLit:
+    size = t.intVal
+    kind = kI
+    impl = ident("int" & containSize(size))
+    if size > 64:
+      raise newException(Defect, "Unable to parse values larger than 64 bits")
+  of nnkIdent:
+    kind = kI
+    var
+      letters: set[char]
       kindPrefix = "int"
-    of nnkIdent:
-      var typ = t.strVal
-
-      case typ[0]
-      of 'l':
-        endian = littleEndian
+    for i, c in t.strVal:
+      case c
+      of 'u', 'f', 's':
+        if letters * {'u', 'f', 's'} != {}:
+          raise newException(Defect, "Type was specified more than once")
+        if c == 'u':
+          kind = kU
+          kindPrefix = "uint"
+        elif c == 'f':
+          kind = kF
+          kindPrefix = "float"
+        elif c == 's':
+          kind = kS
+      of 'l', 'b':
+        if letters * {'l', 'b'} != {}:
+          raise newException(Defect, "Endian was specified more than once")
         ensureIsByteMult = true
-        typ.delete(0, 0)
-      of 'b':
-        endian = bigEndian
-        ensureIsByteMult = true
-        typ.delete(0, 0)
-      else:
-        endian = defaultEndian
-
-      case typ[0]
-      of 'u':
-        kindPrefix = "uint"
-        size = typ[1..^1].parseBiggestInt
-      of 'f':
-        kindPrefix = "float"
-        size = typ[1..^1].parseBiggestInt
-        if size != 32 and size != 64:
-          raise newException(Defect, "Only 32 and 64 bit floats are supported")
-      of 's':
-        if typ.len != 1:
-          size = typ[1..^1].parseBiggestInt
+        if c == 'b':
+          endian = bigEndian
         else:
-          size = 0
-        return (
-          size: BiggestInt(size),
-          endian: defaultEndian,
-          kind: newIdentNode("string"),
-          customReader: nil,
-          customWriter: nil
-        )
+          endian = littleEndian
+      of 'n', 'r':
+        if letters * {'n', 'r'} != {}:
+          raise newException(Defect, "Bit endian was specified more than once")
+        if c == 'n':
+          bitEndian = bigEndian
+        else:
+          bitEndian = littleEndian
       else:
-        try: size = typ.parseBiggestInt
+        try: size = t.strVal[i..^1].parseBiggestInt
         except ValueError:
-          raise newException(Defect, "Format " & t.strVal & " not supported")
-        kindPrefix = "int"
-    of nnkCall:
+          raise newException(Defect, &"Format {t.strVal} not supported")
+        break
+      letters.incl c
+    impl = if 's' in letters: ident"string"
+           else: ident(kindPrefix & containSize(size))
+    if letters * {'l', 'b'} != {} and 's' in letters:
+      raise newException(Defect, "Endianness for strings is not supported")
+    if size > 64:
+      raise newException(Defect, "Unable to parse values larger than 64 bits")
+    if kind in {kI, kU, kF} and size == 0:
+      raise newException(Defect, "Unable to parse values with size 0")
+    if kind == kF and size != 32 and size != 64:
+      raise newException(Defect, "Only 32 and 64 bit floats are supported")
+    if kind == kS and size mod 8 != 0:
+      raise newException(Defect, "Unaligned strings are not supported")
+    if ensureIsByteMult and (size == 8 or size mod 8 != 0):
+      raise newException(Defect, "l/b is only valid for multiple-of-8 sizes")
+  of nnkCall:
+    var t0 = t[0]
+    kind = kC
+    impl = quote do: typeGetter(`t0`)
+    customReader = newCall(nnkDotExpr.newTree(t[0], ident"get"), bs)
+    customWriter = newCall(nnkDotExpr.newTree(t[0], ident"put"), bs)
+    var i = 1
+    while i < t.len:
       var
-        t0 = t[0]
-        customProcRead = newCall(nnkDotExpr.newTree(t[0], newIdentNode("get")), stream)
-        customProcWrite = newCall(nnkDotExpr.newTree(t[0], newIdentNode("put")), stream)
-        retType = quote do:
-          typeGetter(`t0`)
-        i = 1
-      while i < t.len:
-        var
-          readArg = t[i].copyNimTree
-          writeArg = t[i].copyNimTree
-        customProcRead.add(readArg)
-        customProcWrite.add(writeArg)
-        inc i
-      customProcRead.replace(seenFields, newIdentNode("result"))
-      customProcWrite.replace(seenFields, newIdentNode("input"))
-      return (
-        size: BiggestInt(0),
-        endian: defaultEndian,
-        kind: retType,
-        customReader: customProcRead,
-        customWriter: customProcWrite
-      )
-    else:
-      raise newException(Defect, "Unknown kind: " & $t.kind)
-  if size > 64:
-    raise newException(Defect, "Unable to parse values larger than 64 bits")
-  if size == 0:
-    raise newException(Defect, "Unable to parse values with size 0")
-  if ensureIsByteMult and size mod 8 != 0:
-    raise newException(Defect, "l/b is only valid for multiple-of-8 sizes")
-  let containSize =
-    if size > 32:
-      64
-    elif size > 16:
-      32
-    elif size > 8:
-      16
-    else:
-      8
-  return (
+        readArg = t[i].copyNimTree
+        writeArg = t[i].copyNimTree
+      customReader.add(readArg)
+      customWriter.add(writeArg)
+      inc i
+    customReader.prefixFields(seenFields, params, ident"result")
+    customWriter.prefixFields(seenFields, params, ident"input")
+  else:
+    syntaxError()
+  result = (
+    kind: kind,
+    impl: impl,
+    customReader: customReader,
+    customWriter: customWriter,
     size: size,
     endian: endian,
-    kind: newIdentNode(kindPrefix & $containSize),
-    customReader: customReader,
-    customWriter: customWriter
-  )
+    bitEndian: bitEndian)
 
+proc decodeOperations(node: NimNode): Operations =
+  result = initOrderedTable[string, NimNode]()
+  for child in node:
+    result[child[0].strVal] = child[1]
 
-proc getBitInfo(size, offset: BiggestInt):
-  tuple[read, skip, shift, mask: BiggestInt] =
-  result.read = (size+7) div 8
-  result.skip = (size+offset) div 8
-  result.shift = result.read*8 - size - offset
-  result.mask = (1 shl size) - 1
-
-
-proc createReadStatement(
-  field: NimNode,
-  info: tuple[size: BiggestInt; endian: Endianness; kind, customReader, customWriter: NimNode],
-  offset: var BiggestInt, stream: NimNode): NimNode {.compileTime.} =
-  let
-    size = info.size
-    custom = info.customReader
-  if custom != nil:
-    result = (quote do:
-      `field` = `custom`
-    )
-  elif info.kind.kind == nnkIdent and info.kind.strVal == "string":
-    if offset != 0:
-      raise newException(Defect, "Strings must be on byte boundry")
-    if size == 0:
-      result = (quote do:
-        `field` = ""
-        var c = `stream`.readChar()
-        var i = 0
-        while c != '\0':
-          `field`.add(c)
-          c = `stream`.readChar()
-          inc i
-      )
-    else:
-      result = (quote do:
-        `field` = $`stream`.readStr(`size`)
-      )
+proc decodeValue(node: NimNode, seenFields, params: seq[string]): Value =
+  var node = node
+  result = Value()
+  if node.kind == nnkAsgn:
+    result.value = node[1]
+    prefixFields(result.value, seenFields, params, ident"result")
+    node = node[0]
+  if node.kind == nnkIdent:
+    result.repeat = rNo
+    if node.strVal != "_":
+      result.name = node.strVal
   else:
-    var
-      bitInfo = getBitInfo(size, offset)
-      read = bitInfo.read
-      skip = bitInfo.skip
-      shift = bitInfo.shift
-      mask = bitInfo.mask
-    if shift < 0:
-      shift+=8
-      read+=1
-    result = newStmtList()
-    if read == skip:
-      case info.endian
-      of littleEndian:
-        result.add(quote do:
-          `stream`.readDataLE(`field`.addr, `read`)
-        )
-      of bigEndian:
-        result.add(quote do:
-          `stream`.readDataBE(`field`.addr, `read`)
-        )
+    if node[0].strVal != "_":
+      result.name = node[0].strVal
+    case node.kind
+    of nnkBracketExpr:
+      result.repeat = rFor
+    of nnkCurlyExpr:
+      result.repeat = rUntil
     else:
-      case info.endian
-      of littleEndian:
-        result.add(quote do:
-          `stream`.peekDataLE(`field`.addr, `read`)
-        )
-      of bigEndian:
-        result.add(quote do:
-          `stream`.peekDataBE(`field`.addr, `read`)
-        )
-    if skip != 0 and skip != read:
-      result.add(quote do:
-        `stream`.setPosition(`stream`.getPosition() + `skip`)
-      )
-    if (size != 8 and size != 16 and size != 32 and size != 64) or shift != 0:
-      result.add(quote do:
-        `field` = (`field` shr `shift`) and `mask`
-      )
-    offset += size
-    offset = offset mod 8
+      syntaxError()
+    result.repeatExpr = node[1]
 
-
-proc createWriteStatement(
-  field: NimNode,
-  info: tuple[size: BiggestInt; endian: Endianness; kind, customReader, customWriter: NimNode],
-  offset: var BiggestInt, stream: NimNode,
-  tmpVar: NimNode = nil): NimNode {.compileTime.} =
+proc createReadStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
+  result = newStmtList()
   let
-    size = info.size
-    kind = info.kind
-    custom = info.customWriter
-  if custom != nil:
-    custom.insert(2, field)
-    result = (quote do:
-      `custom`
-    )
-  elif info.kind.kind == nnkIdent and info.kind.strVal == "string":
-    if offset != 0:
-      raise newException(Defect, "Strings must be on byte boundry")
-    if size == 0:
-      result = (quote do:
-        `stream`.write(`field`)
-      )
+    kind = typ.kind
+    impl = typ.impl
+    size = typ.size
+    sizeNode = newLit(size.int)
+    endian = if typ.endian == littleEndian: 'l' else: 'b'
+    bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
+    procUnaligned = ident("readbits" & bitEndian & "e")
+    procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`)
+  case kind
+  of kI, kU:
+    if size in {8, 16, 32, 64}:
+      let numKind = if kind == kI: 's' else: 'u'
+      var procAlignedStr = "read" & numKind & $size
+      if size != 8: procAlignedStr &= endian & "e"
+      let procAligned = ident(procAlignedStr)
+      result.add(quote do:
+        if isAligned(`bs`):
+          `sym` = `procAligned`(`bs`)
+        else:
+          `sym` = `impl`(`procUnalignedCall`))
     else:
-      let fieldName = field.toStrLit
-      result = (quote do:
-        if `size` != `field`.len:
-          raise newException(Defect, "String " & `fieldName` & " of given size not matching")
-        `stream`.write(`field`)
-      )
-  else:
+      result.add(quote do:
+        if isAligned(`bs`):
+          resetBuffer(`bs`)
+        `sym` = `impl`(`procUnalignedCall`))
+  of kF:
     let
-      bitInfo = getBitInfo(size, offset)
-      write = bitInfo.read
-      skip = bitInfo.skip
-      shift = bitInfo.shift
-      mask = bitInfo.mask
-    result = newStmtList()
-    if info.size mod 8 == 0:
-      result.add(quote do:
-        `stream`.writeDataBE(`field`.addr, `write`)
-      )
-    else:
-      #[
-      if tmpVar == nil:
-        raise newException(Defect, "tmpVar cannot be nil when size mod" &
-          "8 != 0 and info.kind = " & $info.kind)
-      ]#
-      if tmpVar != nil:
-        if skip != 0 and skip != size div 8:
-          let addspace = (size div 8) * 8
-          result.add(quote do:
-            `tmpVar` = `tmpVar` shl `addspace`
-          )
-        if shift >= 0:
-          result.add(quote do:
-            `tmpVar` = `tmpVar` or (`field` and `mask`).int64 shl `shift`
-          )
-        else:
-          result.add(quote do:
-            `tmpVar` = `tmpVar` or (`field` and `mask`).int64 shr -`shift`
-          )
-      if skip != 0:
-        if tmpVar != nil:
-          case info.endian
-          of littleEndian:
-            result.add(quote do:
-              `stream`.writeDataLE(`tmpVar`.addr, `skip`)
-              `tmpVar` = 0
-            )
-          of bigEndian:
-            result.add(quote do:
-              `stream`.writeDataBE(`tmpVar`.addr, `skip`)
-              `tmpVar` = 0
-            )
-        else:
-          case info.endian
-          of littleEndian:
-            result.add(quote do:
-              `stream`.writeDataLE(`field`.addr, `skip`)
-            )
-          of bigEndian:
-            result.add(quote do:
-              `stream`.writeDataBE(`field`.addr, `skip`)
-            )
-          #[
-      if offset + size > (offset + size) mod 8:
-        result.add(quote do:
-          `tmpVar` = (`field` and `mask`) shl (8 + `shift`)
-        )
-        ]#
-    offset += size
-    offset = offset mod 8
+      procAligned = ident("readf" & $size & endian & "e")
+      floatCast =
+        if size == 64: quote do: cast[float64](`procUnalignedCall`)
+        else: quote do: float32(cast[float64](`procUnalignedCall`))
+    result.add(quote do:
+      if isAligned(`bs`):
+        `sym` = `procAligned`(`bs`)
+      else:
+        `sym` = `floatCast`)
+  of kS:
+    result.add((quote do:
+      if not isAligned(`bs`):
+        raise newException(IOError, "Stream must be aligned to read a string")),
+      if size == 0:
+        quote do: `sym` = readStr(`bs`)
+      else:
+        quote do: `sym` = readStr(`bs`, `sizeNode`))
+  of kC:
+    let call = typ.customReader
+    result.add(quote do: `sym` = `call`)
 
+proc createWriteStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
+  result = newStmtList()
+  let
+    kind = typ.kind
+    impl = typ.impl
+    size = typ.size
+    sizeNode = newLit(size.int)
+    lenNode = newLit(size.int div 8)
+    endian = if typ.endian == littleEndian: 'l' else: 'b'
+    bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
+  case kind
+  of kI, kU, kF:
+    let procUnaligned = ident("writebits" & bitEndian & "e")
+    if sym == nil:
+      result.add(quote do:
+        `procUnaligned`(`bs`, `sizeNode`, 0))
+    else:
+      let tmp = genSym(nskVar)
+      result.add(quote do:
+        var `tmp` = `sym`)
+      if size in {8, 16, 32, 64}:
+        let procAligned = ident("write" & endian & "e")
+        result.add(quote do:
+          if isAligned(`bs`):
+            `procAligned`(`bs`, `impl`(`tmp`))
+          else:
+            `procUnaligned`(`bs`, `sizeNode`, `tmp`))
+      else:
+        result.add(quote do: `procUnaligned`(`bs`, `sizeNode`, `tmp`))
+  of kS:
+    if size == 0 and sym == nil:
+      raise newException(Defect,
+        "Null-terminated strings must have a name or value")
+    result.add(quote do:
+      if not isAligned(`bs`):
+        raise newException(IOError, "Stream must be aligned to write a string"))
+    let tmp = genSym(nskVar)
+    result.add(
+      if sym == nil:
+        quote do:
+          writeZeroBytes(`bs`, `lenNode`)
+      elif size == 0:
+        quote do:
+          var `tmp` = `sym`
+          writeTermStr(`bs`, `tmp`)
+      else:
+        quote do:
+          var `tmp` = `sym`
+          writeStr(`bs`, `tmp`))
+  of kC:
+    let call = typ.customWriter
+    call.insert(2, sym)
+    result.add(quote do: `call`)
 
 macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
   ## The main macro in this module. It takes the ``name`` of the tuple to
   ## create along with a block on the format described above and creates a
   ## reader and a writer for it. The output is a tuple with ``name`` that has
   ## two fields ``get`` and ``put``. Get is on the form
-  ## ``proc (stream: Stream): tuple[<fields>]`` and put is
-  ## ``proc (stream: Stream, input: tuple[<fields>])``
+  ## ``proc (bs: BitStream): tuple[<fields>]`` and put is
+  ## ``proc (bs: BitStream, input: tuple[<fields>])``
   let
     body = paramsAndDef[^1]
-    res = newIdentNode("result")
-    stream = newIdentNode("stream")
-    input = newIdentNode("input")
-    tmpVar = genSym(nskVar)
+    res = ident"result"
+    bs = ident"s"
+    input = ident"input"
   var
-    inner = newStmtList()
+    reader = newStmtList()
     writer = newStmtList()
-    tupleMeat = nnkTupleTy.newNimNode
+    tupleMeat = newTree(nnkTupleTy)
     i = 0
-    field = 0
-    readOffset: BiggestInt = 0
-    writeOffset: BiggestInt = 0
+    fidx = 0
     seenFields = newSeq[string]()
     extraParams = newSeq[NimNode]()
+    params = newSeq[string]()
+    opts = defaultOptions
+    specifiedOpts: set[OptionSet]
   while i < paramsAndDef.len - 1:
     let p = paramsAndDef[i]
-    if p.kind != nnkExprColonExpr:
-      raise newException(Defect, "Extra arguments must be colon expressions")
-    extraParams.add(newIdentDefs(p[0], p[1]))
+    case p.kind
+    of nnkExprColonExpr:
+      extraParams.add(newIdentDefs(p[0], p[1]))
+      params.add(p[0].strVal)
+    of nnkExprEqExpr:
+      case p[0].strVal
+      of "endian":
+        if osEndian in specifiedOpts:
+          raise newException(Defect,
+            "Option 'endian' was specified more than once")
+        case p[1].strVal
+        of "b": opts.endian = bigEndian
+        of "l": opts.endian = littleEndian
+        else:
+          raise newException(Defect,
+            "Invalid value for endian option (valid values: l, b)")
+        specifiedOpts.incl osEndian
+      of "bitEndian":
+        if osBitEndian in specifiedOpts:
+          raise newException(Defect,
+            "Option 'bitEndian' was specified more than once")
+        case p[1].strVal
+        of "n": opts.bitEndian = bigEndian
+        of "r": opts.bitEndian = littleEndian
+        else:
+          raise newException(Defect,
+            "Invalid value for 'bitEndian' option (valid values: n, r)")
+        specifiedOpts.incl osBitEndian
+      else:
+        raise newException(Defect, &"Unknown option: {$p[0]}")
+    else:
+      syntaxError()
     inc i
   i = 0
   while i < body.len:
     var
-      def = body[i]
-    if def.kind == nnkPrefix:
-      if def[1].kind != nnkCall:
-        def = newCall(newCall(def[1]), def[2])
-      else:
-        def = newCall(def[1], def[2])
-    var
-      info = decodeType(def[0], stream, seenFields)
-    let
-      size = info.size
-      kind = info.kind
-    case def[1][0].kind:
-      of nnkAsgn:
-        let magic = def[1][0][1]
-        var
-          sym: NimNode
-          writeSym: NimNode
-        if def[1][0][0].strVal == "_":
-          sym = genSym(nskVar)
-          writeSym = genSym(nskVar)
-          inner.add(quote do:
-            var `sym`: `kind`
-          )
-          writer.add(quote do:
-            var `writeSym`: `kind` = `magic`
-          )
-          dec field
-        else:
-          sym = (quote do: `res`[`field`])
-          writeSym = (quote do: `input`[`field`])
-          let
-            resfield = newIdentNode($def[1][0][0])
-          seenFields.add $def[1][0][0]
-          tupleMeat.add(nnkIdentDefs.newTree(resfield, kind, newEmptyNode()))
-        if $info.kind == "string":
-          info.size = ($magic).len
-        inner.add(createReadStatement(sym, info, readOffset, stream))
-        writer.add(createWriteStatement(writeSym, info, writeOffset, stream))
-        inner.add(quote do:
-          if `sym` != `magic`:
-            raise newException(MagicError,
-              "Magic with size " & $`size` &
-              " didn't match value " & $`magic` & ", read: " & $`sym`)
-        )
-      of nnkBracketExpr:
-        let
-          sym = def[1][0][0]
-          resfield = newIdentNode($sym)
-        seenFields.add $sym
-        tupleMeat.add(
-          nnkIdentDefs.newTree(
-            resfield,
-            nnkBracketExpr.newTree(newIdentNode("seq"), kind),
-            newEmptyNode()
-          )
-        )
-        let
-          iiRead = genSym(nskVar)
-          iiWrite = genSym(nskVar)
-          startReadOffset = readOffset
-          startWriteOffset = writeOffset
-        var
-          readFieldOps = @[
-            createReadStatement(
-              (quote do: `res`[`field`][`iiRead`]), info, readOffset, stream
-            )
-          ]
-        while startReadOffset != readOffset:
-          readFieldOps.add createReadStatement(
-            (quote do: `res`[`field`][`iiRead`]), info, readOffset, stream
-          )
-        var
-          writeFieldOps = @[
-            createWriteStatement(
-              (quote do: `input`[`field`][`iiWrite`]), info, writeOffset, stream, tmpVar
-            )
-          ]
-        while startWriteOffset != writeOffset:
-          writeFieldOps.add createWriteStatement(
-            (quote do: `input`[`field`][`iiWrite`]), info, writeOffset, stream, tmpVar
-          )
-        let
-          readFieldCount = readFieldOps.len
-          writeFieldCount = writeFieldOps.len
-        var
-          readField = nnkCaseStmt.newTree(
-            (quote do: `iiRead` mod `readFieldCount`)
-          )
-          writeField = nnkCaseStmt.newTree(
-            (quote do: `iiWrite` mod `writeFieldCount`)
-          )
-        var iii = 0
-        for curField in readFieldOps:
-          readField.add(nnkOfBranch.newTree(
-            newLit(iii), curField
-          ))
-          inc iii
-        iii = 0
-        for curField in writeFieldOps:
-          writeField.add(nnkOfBranch.newTree(
-            newLit(iii), curField
-          ))
-          inc iii
-        readField.add(
-          nnkElse.newTree(
-            nnkDiscardStmt.newTree(nnkEmpty.newNimNode())
-          )
-        )
-        writeField.add(
-          nnkElse.newTree(
-            nnkDiscardStmt.newTree(nnkEmpty.newNimNode())
-          )
-        )
-        let x = genSym(nskForvar)
-        var writeNull =
-          if kind.kind == nnkIdent and kind.strVal == "string":
-            if size == 0:
-              (quote do:
-                `stream`.write(0'u8))
-            else:
-              (quote do:
-                if `size` != `x`.len:
-                  raise newException(Defect,
-                    "String for field of static length not right size"))
-          else:
-            newStmtList()
-        writer.add(quote do:
-          var `iiWrite` = 0
-          while `iiWrite` < (`input`[`field`].len).int:
-            `writeField`
-            `writeNull`
-            inc `iiWrite`
-        )
-        if def[1][0].len == 2:
-          var readFields = def[1][0][1].copyNimTree
-          readFields.replace(seenFields, res)
-          inner.add(quote do:
-            `res`[`field`] = newSeq[`kind`](`readFields`)
-            var `iiRead` = 0
-            while `iiRead` < (`readFields`).int:
-              `readField`
-              inc `iiRead`
-          )
-        else:
-          if body.len > i+1:
-            let endMagic = body[i+1]
-            if endMagic[1][0].kind != nnkAsgn:
-              raise newException(Defect,
-                "Open arrays must be followed by magic for termination")
-            let
-              endInfo = decodeType(endMagic[0], stream, seenFields)
-              magic = endMagic[1][0][1]
-              endKind = endInfo.kind
-              peek = newIdentNode("peek" & $endInfo.kind)
-              bitInfo = getBitInfo(endInfo.size, readOffset)
-              shift = bitInfo.shift
-              mask = bitInfo.mask
-            inner.add(quote do:
-              `res`[`field`] = newSeq[`kind`]()
-              var `iiRead` = 0
-            )
-            if $endInfo.kind != "string":
-              inner.add(quote do:
-                while ((`stream`.`peek`() shr
-                      (((`readFieldCount` - 1) - (`iiRead` mod `readFieldCount`)) *
-                      `shift`)) and `mask`).`endKind` != `magic`.`endKind`:
-                  `res`[`field`].setLen(`res`[`field`].len+1)
-                  `readField`
-                  inc `iiRead`
-                `stream`.setPosition(`stream`.getPosition()+sizeof(`endKind`))
-              )
-              inc i
-            else:
-              inner.add(quote do:
-                while `stream`.peekStr(len(`magic`)) != `magic`:
-                  `res`[`field`].setLen(`res`[`field`].len+1)
-                  `readField`
-                  inc `iiRead`
-              )
-          else:
-            inner.add(quote do:
-              `res`[`field`] = newSeq[`kind`]()
-              var `iiRead` = 0
-              while not `stream`.atEnd:
-                `res`[`field`].setLen(`res`[`field`].len+1)
-                `readField`
-                inc `iiRead`
-            )
-        readOffset = 0
-        writeOffset = 0
+      def = body[i].copyNimTree
+      a, b, c: NimNode
+    case def.kind
+    of nnkPrefix:
+      c = def[2][0].copyNimTree
+      case def[1].kind
       of nnkIdent:
-        if def[1][0].strVal == "_":
-          if def[0].kind == nnkIdent and def[0].strVal == "s":
-            writer.add(quote do:
-              `stream`.write(0'u8)
-            )
-            inner.add(quote do:
-              while (`stream`.readint8() != 0): discard
-            )
-            dec field
+        a = newCall(def[1].copyNimTree)
+      of nnkCall:
+        a = def[1].copyNimTree
+      of nnkCommand:
+        a = def[1][0].copyNimTree
+        b = def[1][1].copyNimTree
+      else: syntaxError()
+    of nnkCall:
+      a = def[0].copyNimTree
+      c = def[1][0].copyNimTree
+    of nnkCommand:
+      a = def[0].copyNimTree
+      b = def[1].copyNimTree
+      c = def[2][0].copyNimTree
+    else: syntaxError()
+    let
+      typ = decodeType(a, bs, seenFields, params, opts)
+      ops = decodeOperations(b)
+      val = decodeValue(c, seenFields, params)
+      impl = typ.impl
+      field = val.name
+      value = val.value
+    var rSym, wSym: NimNode
+    let
+      rTmp = genSym(nskVar)
+      wTmp = genSym(nskVar)
+    if val.repeat == rNo:
+      reader.add(quote do:
+        var `rTmp`: `impl`)
+      rSym = rTmp
+      wSym = if field == "":
+               if value == nil: nil
+               else: value
+             else: quote do: `input`[`fidx`]
+      reader.add createReadStatement(rSym, bs, typ)
+      writer.add createWriteStatement(wSym, bs, typ)
+      if field != "":
+        tupleMeat.add(nnkIdentDefs.newTree(ident(field), impl, newEmptyNode()))
+        seenFields.add(field)
+    else:
+      reader.add(quote do:
+        var `rTmp`: seq[`impl`])
+      var
+        rExpr = val.repeatExpr.copyNimTree
+        wExpr = val.repeatExpr.copyNimTree
+      rExpr.prefixFields(seenFields, params, res)
+      wExpr.prefixFields(seenFields, params, input)
+      case val.repeat
+      of rFor:
+        let
+          rLoopIdx = genSym(nskForVar)
+          wLoopElem = genSym(nskForVar)
+
+        rSym = quote do: `rTmp`[`rLoopIdx`]
+        let readStmt = createReadStatement(rSym, bs, typ)
+        reader.add(quote do:
+          `rTmp` = newSeq[`impl`](`rExpr`)
+          for `rLoopIdx` in 0 ..< int(`rExpr`): `readStmt`)
+        wSym = quote do: `wLoopElem`
+        writer.add(
+          if val.name == "":
+            if value == nil:
+              quote do:
+                var `wTmp` = newSeq[`impl`](`wExpr`)
+            else:
+              quote do:
+                var `wTmp` = `value`
           else:
-            let
-              readJump =
-                if size mod 8 != 0:
-                  if (readOffset+size) mod 8 < readOffset+size: 1 else: 0
-                else:
-                  0
-              writeJump =
-                if size mod 8 != 0:
-                  if (writeOffset+size) mod 8 < writeOffset+size: 1 else: 0
-                else:
-                  0
-            writer.add(quote do:
-              for i in 0..<(`size` div 8 + `writeJump`):
-                `stream`.write(0'u8)
-            )
-            inner.add(quote do:
-              `stream`.setPosition(`stream`.getPosition()+`size` div 8 + `readJump`)
-            )
-            readOffset += size
-            readOffset = readOffset mod 8
-            writeOffset += size
-            writeOffset = writeOffset mod 8
-            dec field
-        else:
-          let
-            sym = def[1][0]
-            resfield = newIdentNode($sym)
-          seenFields.add $sym
-          tupleMeat.add(nnkIdentDefs.newTree(resfield, kind, newEmptyNode()))
-          inner.add(
-            createReadStatement(
-              (quote do: `res`[`field`]), info, readOffset, stream
-            )
-          )
-          writer.add(
-            createWriteStatement(
-              (quote do: `input`[`field`]), info, writeOffset, stream, tmpVar
-            )
-          )
-      else:
-        discard
+            quote do:
+              var `wTmp` = `input`[`fidx`])
+        let writeStmt = createWriteStatement(wSym, bs, typ)
+        writer.add(quote do:
+          for `wLoopElem` in `wTmp`: `writeStmt`)
+      of rUntil:
+        let
+          rLoopIdx = genSym(nskVar)
+          wLoopIdx = genSym(nskForVar)
+          wLoopElem = genSym(nskForVar)
+        rSym = genSym(nskVar)
+        rExpr.replaceWith(ident"e", rSym)
+        rExpr.replaceWith(ident"i", rLoopIdx)
+        rExpr.replaceWith(ident"s", bs)
+        let readStmt = createReadStatement(rSym, bs, typ)
+        reader.add (quote do:
+          `rTmp` = newSeq[`impl`]()
+          var
+            `rLoopIdx`: int
+            `rSym`: `impl`
+          while true:
+            `readStmt`
+            `rTmp`.add(`rSym`)
+            inc `rLoopIdx`
+            if `rExpr`: break)
+        wSym = wLoopElem
+        wExpr.replaceWith(ident"e", wSym)
+        wExpr.replaceWith(ident"i", wLoopIdx)
+        wExpr.replaceWith(ident"s", bs)
+        writer.add(
+          if val.name == "":
+            if value == nil:
+              quote do:
+                var `wTmp` = newSeq[`impl`](`wExpr`)
+            else:
+              quote do:
+                var `wTmp` = `value`
+          else:
+            quote do:
+              var `wTmp` = `input`[`fidx`])
+        let writeStmt = createWriteStatement(wSym, bs, typ)
+        writer.add(quote do:
+          for `wLoopIdx`, `wLoopElem` in `wTmp`: `writeStmt`)
+      else: discard
+      if field != "":
+        tupleMeat.add(nnkIdentDefs.newTree(
+                      ident(field), quote do: seq[`impl`], newEmptyNode()))
+        seenFields.add(field)
+    if value != nil:
+      reader.add(quote do:
+        if `rTmp` != (`value`):
+          raise newException(MagicError, "field '" & $`field` & "' was " &
+                            $`rTmp` & " instead of " & $`value`))
+    if field != "":
+      reader.add(quote do: `res`[`fidx`] = `rTmp`)
     when defined(binaryparseLog):
       # This can be used for debugging, should possibly be exposed by a flag
-      inner.add(quote do:
-        when `field` >= 0:
+      reader.add(quote do:
+        when `fidx` >= 0:
           echo "Done reading field " & $`i` & ": " & $`res`[`field`]
         else:
-          echo "Done reading field " & $`i`
-      )
+          echo "Done reading field " & $`i`)
     inc i
-    inc field
+    if field != "": inc fidx
   let
     readerName = genSym(nskProc)
     writerName = genSym(nskProc)
+  if tupleMeat.len == 0:
+    let dummy = genSym(nskField)
+    tupleMeat.add(nnkIdentDefs.newTree(dummy, ident"int", newEmptyNode()))
   result = quote do:
-    proc `readerName`(`stream`: Stream): `tupleMeat` =
-      `inner`
-    proc `writerName`(`stream`: Stream, `input`: var `tupleMeat`) =
-      var `tmpVar`: int64 = 0
+    proc `readerName`(`bs`: BitStream): `tupleMeat` =
+      `reader`
+    proc `writerName`(`bs`: BitStream, `input`: `tupleMeat`) =
       `writer`
     let `name` = (get: `readerName`, put: `writerName`)
   for p in extraParams:
-    result[0][3].add p
+    result[0][3].add p.copyNimTree
     result[1][3].add p.copyNimTree
 
   when defined(binaryparseEcho):
-    echo result.toStrLit
-
-when isMainModule:
-  createParser(list, size: uint16):
-    u8: _
-    u8: data[size]
-
-  createParser(myParser):
-    u8: _ = 128
-    u16: size
-    4: data[size*2]
-    s: str[]
-    s: _ = "9xC\0"
-    *list(size): inner
-    u8: _ = 67
-    bu16: _ = 258
-    lu16: _ = 513
-
-  createParser(tert):
-    3: test[8]
-
-  createParser(ccsds_header):
-    u3: version
-    u1: packet_type
-    u1: secondary_header
-    u11: apid
-
-  createParser(debug):
-    u8: _ = 128
-    u16: size
-
-  createParser(twoInts):
-    8: first
-    8: second
-
-  createParser(test):
-    *twoInts: fields[]
-
-  createParser(terminatedInts):
-    u32: myInts[]
-
-  block parse:
-    var fs = newFileStream("data.hex", fmRead)
-    defer: fs.close()
-    if not fs.isNil:
-      var data = myParser.get(fs)
-      echo data.size
-      echo data.data
-      echo data.str
-      echo data.inner.data
-      var fs3 = newFileStream("data_out.hex", fmWrite)
-      defer: fs3.close()
-      if not fs3.isNil:
-        myParser.put(fs3, data)
-    var fs2 = newFileStream("out.hex", fmWrite)
-    defer: fs2.close()
-    if not fs2.isNil:
-      var data: typeGetter(tert)
-      data.test = @[1'i8, 2, 3, 4, 5, 6, 7, 0]
-      tert.put(fs2, data)
-    var ss = newStringStream("Hello world!")
-    var readData = test.get(ss)
-    echo readData
-    var ss2 = newStringStream()
-    test.put(ss2, readData)
-    ss2.setPosition(0)
-    echo ss2.readAll()
-
-    var
-      ss3 = newStringStream()
-      outData: typeGetter(terminatedInts)
-    outData.myInts = @[1'u32,2,3,4,5,6]
-    terminatedInts.put(ss3, outData)
-    ss3.setPosition(0)
-    echo terminatedInts.get(ss3)
-
+    echo repr result

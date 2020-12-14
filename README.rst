@@ -1,103 +1,262 @@
 binaryparse
 ===========
-This module implements a macro to create binary parsers. The parsers
-generated reads from a Stream and returns a tuple with each named field.
-The general format the macro takes is:
+This module implements a DSL for creating binary parsers/encoders.
+It exports the macro ``createParser`` which generates a ``tuple[get: proc, put: proc]``.
+``get`` returns a tuple with each parsed field and ``put`` writes a compatible tuple to the stream.
 
-``[type]<size>: <name>[options]``
+The macro accepts 3 kind of things:
 
-Where optional fields are in [] brackets and required fields are in <>
-brackets. Each field has separate meanings, as described in the table below:
+-  Parser options
+-  Parser parameters
+-  Block with DSL statements
 
-========== ==================================================================
-Name       Description
----------- ------------------------------------------------------------------
-type       This is the type of value found in this field, if no type is
-           specified then it will be parsed as an integer. Supported types
-           are ``u`` to get unsigned integers, ``f`` for floating point,
-           ``s`` for strings, and ``*`` for custom parser.
-size       The size, in *bits*, of the field to read. For uint and int values
-           from 1 to 64 inclusive are supported. For floats only 32 and 64
-           are supported. Strings use this field to specify the amount of
-           characters to read into the string. If they don't specify a size
-           they will be read to the first NULL byte (this only applies to
-           strings). When the custom parser type is specified the size field
-           is used to name the custom parser procedure.
-name       The name of the value, this will be used as the name in the
-           resulting tuple. If the value doesn't need to be stored one can
-           use ``_`` as the name and it will not get a field in the result.
-options    These will change the regular behaviour of reading into a field.
-           Since they are so different in what they do they are described
-           below instead of in this table.
-========== ==================================================================
+Parser options
+--------------
 
-Many binary formats include special "magic" sequences to identify the file
-or regions within it. The option ``= <value>`` can be used to check if a
-field has a certain value. If the value doesn't match a MagicError is
-raised. Value must match the value of the field it checks. When the field is
-a string type the exact length of the magic string is read, to include a
-terminating NULL byte use ``\0`` in the string literal.
+Each specified option must be in the form ``option = value``:
 
-To read more fields of a certain kind into a sequence you can use the option
-``[[count]]`` (that is square brackets with an optional count inside). If no
-count is specified and the brackets left empty it must be the last field or
-the next field needs to be a magic number and will be used to terminate the
-sequence. If it is the last field it will read until the end of the stream.
-As count you can use the name of any previous field, literals, previously
-defined variables, or a combination. Note that all sequences are assumed to
-terminate on a byte border, even if given a statically evaluatable size.
+- ``endian``: sets the default endianness for the whole parser
+   - *default*: big endian
+   - ``b``: **big** endian
+   - ``l``: **little** endian
+- ``bitEndian``: sets the default bit-endianness for the whole parser
+   - *default*: left -> right
+   - ``n``: left -> right (**normal**)
+   - ``r``: left <- right (**reverse**)
 
-Another thing commonly found in binary formats are repeating blocks or
-formats within the format. These can be read by using a custom parser.
-Custom parsers technically supports any procedure that takes a Stream as the
-first argument, however care must be taken to leave the Stream in the correct
-position. You can also define the inner format with a parser from this module
-and then pass that parser to the outer parser. This means that you can easily
-nest parsers. If you need values from the outer parser you can add parameters
-to the inner parser by giving it colon expressions before the body (e.g the
-call ``createParser(list, size: uint16)`` would create a parser
-``proc (stream: Stream, size: uint16): <return type>``). To call a parser
-use the ``*`` type as described above and give it the name of the parser and
-any optional arguments. The stream object will get added automatically as the
-first parameter.
+Parser parameters
+-----------------
 
-When creating a parser you get a tuple with two members, ``get`` and ``put``
-which is stored by a let as the identifier given when calling createParser.
-These are both procedures, the first only takes a stream (and any optional
-arguments as described above) and returns a tuple containing all the fields.
-The second takes a stream and a tuple containing all the fields, this is the
-same tuple returned by the ``get`` procedure and writes the format to the
-stream.
+Each parameter must be in the form ``symbol: type``. The generated
+``get``/``put`` procs will then have this additional parameter appended.
+
+DSL
+----
+
+Each statement corresponds to 1 field. The general syntax is:
+
+.. code:: nim
+
+    Type {Operations}: Value
+
+where ``{Operations}`` is optional and refers to a plugin system (see
+below).
+
+Type
+~~~~
+
+The **kind**, **endianness** and **size** are encoded in a identifier
+made up of:
+
+- 1 optional letter specifying the kind:
+   - *default*: signed integer
+   - ``u``: **unsigned** integer
+   - ``f``: **float**
+   - ``s``:**string**
+   - ``*``: complex (see below)
+- 1 optional letter specifying endianness:
+   - *default*: big endian
+   - ``b``: **big** endian
+   - ``l``: **little** endian
+- 1 optional letter specifying big-endianness for unaligned reads:
+   - *default*: left -> right
+   - ``n``: left -> right (**normal**)
+   - ``r``: left <- right (**reverse**)
+- 1 number specifying size in **bits**:
+   - for strings only byte multiples are allows (``8``, ``16``, ``24``, ...)
+   - for an integer the allowed values are ``1 .. 64``
+   - for a float the allowed values are ``32`` and ``64``
+   - for a custom it can't be used (use the secondary ``size`` operation)
+
+| Strings may not have a size, in which case they are null-terminated.
+| You can order options however you want, but size must come last (e.g. ``lru16`` and ``url16`` are valid but not ``16lru``).
+
+Value
+~~~~~
+
+This section consists of a mandatory name for the field + optional
+repetition + optional assertion.
+
+For primitive types (except null-terminated strings) you can instruct
+binaryparse to not produce a symbol and discard the field by using ``_``
+for the name:
+
+.. code:: nim
+
+    createParser(magic):
+      s: _ = "GIF89a"
+
+Alignment
+~~~~~~~~~
+
+Currently unaligned reads for strings are not supported:
+
+.. code:: nim
+
+    createParser(myParser):
+      6: x
+      s: y # invalid, generates an exception
+
+| Endian only refers to aligned reads, while bit-endian only refers to unaligned reads.
+| When reading unaligned data, you should always ensure that bit-endian is uniform between **byte boundaries**.
+| Your spec must finish on a byte boundary.
+
+.. code:: nim
+
+    createParser(myParser, bitEndian = n):
+      2: a
+      16: b # n/r will be considered; l/b is irrelevant
+      r6: c # undefined behavior: shares bits with previous byte
+      16: d # l/b will be considered; n/r is irrelevant
+      10: e # undefined behavior: spec does not finish on a byte boundary
+
+-  When using an irrelevant option, binaryparse should generate a
+   **warning**
+-  When switching bit-endian between 2 unaligned reads binaryparse
+   should generate an **exception**
+-  When spec does not end on a byte boundary, binaryparse should
+   either generate an **exception** or pad the last byte with
+   zeros and generate a **warning**
+
+Repetition
+~~~~~~~~~~
+
+There are 2 ways to produce a ``seq`` of your ``Type``:
+
+- ``for repetition``: append ``[expr]`` to the name for repeating ``expr``
+  times
+- ``until repetition``: append ``{expr}`` to the name for repeating until
+  ``expr`` is evaluated to ``true``
+
+In until repetition you can use 3 special symbols:
+
+- ``e``: means 'last element read'
+- ``i``: means 'current loop index'
+- ``s``: means 'stream'
+
+.. code:: nim
+
+    u8: a{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
+
+.. code:: nim
+
+    16: x[5] # seq[int16] of size 5
+    16: y{s.atEnd} # seq[int16] until end of stream
+
+Assertion
+~~~~~~~~~
+
+Use ``= expr`` for producing an exception if the parsed value doesn't
+match ``expr``.
 
 Example:
-In lieu of proper examples the binaryparse.nim file contains a ``when
-isMainModule()`` block showcasing how it can be used. The table below
-describes that block in a bit more detail:
 
-======================= =====================================================
-Format                  Description
------------------------ -----------------------------------------------------
-``u8: _ = 128``         Reads an unsigned 8-bit integer and checks if it
-                        equals 128 without storing the value as a field in
-                        returned tuple
-``u16: size``           Reads an unsigned 16-bit integer and names it
-                        ``size`` in the returned tuple
-``4: data[size*2]``     Reads a sequence of 4-bit integers into a ``data``
-                        field in the returned tuple. Size is the value read
-                        above, and denotes the count of integers to read.
-``s: str[]``            Reads null terminated strings into a ``str`` field in
-                        the returned tuple. Since it's given empty brackets
-                        the next field needs to be a magic field and the
-                        sequence will be read until the magic is found.
-``s: _ = "9xC\0"``      Reads a non-null terminated string and checks if it
-                        equals the magic sequence.
-``*list(size): inner``  Uses a pre-defined procedure ``list`` which is called
-                        with the current Stream and the ``size`` read
-                        earlier. Stores the return value in a field ``inner``
-                        in the returned tuple.
-``u8: _ = 67``          Reads an unsigned 8-bit integer and checks if it
-                        equals 67 without storing the value.
-======================= =====================================================
+.. code:: nim
+
+    s: x = "binaryparse is awesome"
+    8: y[5] = @[0, 1, 2, 3, 4]
+
+Complex types
+~~~~~~~~~~~~~
+
+Instead of the described identifier for specifying ``Type``, you can
+call a previously defined parser by using ``*`` followed by the name of
+the parser. If your parser is parametric you must pass arguments to it
+with standard call syntax.
+
+Example:
+
+.. code:: nim
+
+    createParser(inner):
+      32: a
+      32: b
+
+    createParser(innerWithArgs, size: int32):
+      32: a
+      32: b[size]
+
+    createParser(outer):
+      *inner: x
+      *innerWithArgs(x.a): y
+
+Custom parser API
+~~~~~~~~~~~~~~~~~
+
+Since a binaryparse parser is just a ``tuple[get: proc, set: proc]``,
+you can write parsers by hand that are compatible with the DSL. Just be
+sure that ``get`` and ``set`` have a proper signature:
+
+.. code:: nim
+
+    type parserTy = tuple[...]
+    proc get(s: BitStream): parserTy
+    proc put(s: BitStream, input: parserTy)
+    let parser = (get: get, put: put)
+
+If you want your custom parser to be parametric, simply append more
+parameters to your procs. These extra parameters must be identical and
+in the same order in the two procs.
+
+Example:
+
+.. code:: nim
+
+    type parserTy = tuple[...]
+    proc get(s: BitStream, x: int, y: float): parserTy
+    proc put(s: BitStream, input: parserTy, x: int, y: float)
+    let parser = (get: get, put: put)
+
+Operations (plugins)
+~~~~~~~~~~~~~~~~~~~~
+
+Plugins are **user-defined** keys which define an operation on a field.
+They are parametric, which means they also have a value. The API for
+writing plugins is not designed yet, but the syntax for using them is:
+
+.. code:: nim
+
+    Type {plugin: expr}: Value
+
+Examples of plugins
+~~~~~~~~~~~~~~~~~~~
+
+- ``pos``: positions the ``stream`` at byte ``value`` before parsing and then
+  resets it to the previous position
+- ``cond``: wraps the field into an ``Option`` type and will only parse it if
+  ``value`` is evaluated to ``true``
+- ``size``: reads ``value`` bytes from the stream and creates a *substream*
+
+You can combine multiple operations which will be applied to the field
+in the specified order:
+
+.. code:: nim
+
+    8: shouldParse
+    16 {cond: shouldParse.bool, size: 4}: x
+
+First ``shouldParse.bool`` will be evaluted. If it's ``false``, parsing
+won't happen; if it's true, then 4 bytes will be read from the stream
+and a substream with them will be created. Then, 16 bits will be read
+from this substeam. Finally, these bits will be wrapped into an
+``Option`` and the resulting field will be an Option[int16].
+
+When you produce a sequence, ``Operations`` apply to **the whole**
+sequence (not each individual element).
+
+Special notes
+~~~~~~~~~~~~~
+
+- Strings are always read from left to right regardless of endian
+- Nim expressions may contain:
+   - a previously defined field
+   - a parser parameter
+   - the ``e`` symbol if it's a repetition until expression
+   - the ``i`` symbol if it's a repetition until expression
+   - the ``s`` symbol if it's a repetition until or assertion expression
+
+These last 3 symbols might conflict with your variables or fields, so you
+shouldn't use them for something else.
 
 This file is automatically generated from the documentation found in
 binaryparse.nim. Use ``nim doc2 binaryparse.nim`` to get the full documentation.
