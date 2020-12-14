@@ -109,11 +109,11 @@ otherwise strings they are null-terminated:
     s: arr4(x)[] # a seq of strings of length x until next field is matched
     f32: _ = 2.5
 
-## Substream
-~~~~~~~~~
+Substreams
+~~~~~~~~~~
 
 The call syntax described in the previous section in not limited to strings.
-In fact, it more generally indicates the creation of a **substream**:
+In fact, it more generally forces the creation of a **substream**:
 
 .. code:: nim
 
@@ -122,7 +122,7 @@ In fact, it more generally indicates the creation of a **substream**:
       16: y
     createParser(myParser):
       8: size = 4
-      *inner: fixed(4*size)
+      *inner: fixed(8*size)
 
 In the above example, ``size`` bits (32 in this case) will be read from the main ``BitStream``.
 Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
