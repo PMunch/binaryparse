@@ -71,8 +71,12 @@
 ## Value
 ## ~~~~~
 ##
-## This section consists of a mandatory **name** for the field + optional
-## **repetition** + optional **assertion**.
+## This section consists of a the following attributes in order:
+##
+## - **name** for the field (mandatory)
+## - substream **size** (optional)
+## - **repetition** (optional)
+## - **assertion** optional)
 ##
 ## For primitive types (except null-terminated strings) you can instruct
 ## binaryparse to not produce a symbol and discard the field by using ``_``
@@ -86,7 +90,7 @@
 ## Strings
 ## ~~~~~~~
 ##
-## You can use call notation to specify length or an assertion to specify an exact expected value (see below),
+## You can use call syntax to specify length or an assertion to specify an exact expected value (see below),
 ## otherwise strings they are null-terminated:
 ## 
 ## .. code:: nim
@@ -102,6 +106,25 @@
 ##     16: _ = x + 3
 ##     s: arr4(x)[] # a seq of strings of length x until next field is matched
 ##     f32: _ = 2.5
+##
+## ## Substream
+## ~~~~~~~~~
+##
+## The call syntax described in the previous section in not limited to strings.
+## In fact, it more generally indicates the creation of a **substream**:
+## 
+## .. code:: nim
+## 
+##     createParser(inner):
+##       8: x
+##       16: y
+##     createParser(myParser):
+##       8: size = 4
+##       *inner: fixed(4*size)
+## 
+## In the above example, ``size`` bits (32 in this case) will be read from the main ``BitStream``.
+## Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
+## Since ``inner`` will only use 24 of them, the remaining 8 bits will effectively be discarded.
 ##
 ## Alignment
 ## ~~~~~~~~~
