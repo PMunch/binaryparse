@@ -5,5 +5,5 @@ description   = "Binary parser/encoder DSL"
 license       = "MIT"
 
 # Dependencies
-requires "nim >= 0.19.0"
+requires "nim >= 1.1"
 requires "bitstreams"

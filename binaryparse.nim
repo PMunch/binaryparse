@@ -125,7 +125,8 @@
 ## In the above example, ``size`` bytes (4 in this case) will be read from the main ``BitStream``.
 ## Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
 ## Since ``inner`` will only use 3 of them, the remaining 1 will effectively be discarded.
-## Note that unlike in ``Type``, here size is in counted bytes.
+## Note that unlike in ``Type``, here size is in counted bytes. It is implied that you cannot create
+## a substream if your bitstream is unaligned.
 ##
 ## Alignment
 ## ~~~~~~~~~
@@ -292,7 +293,7 @@
 ## shouldn't use them for something else.
 ##
 
-import macros, tables, strutils, strformat
+import macros, tables, strutils, sugar, strformat
 import bitstreams
 
 type
@@ -306,13 +307,14 @@ type
     osEndian
     osBitEndian
   Kind = enum
-    kI, kU, kF, kS, kC
-  Type = tuple
-    kind: Kind
-    impl: NimNode
-    customReader: NimNode
-    customWriter: NimNode
-    size: BiggestInt
+    kInt, kUInt, kFloat, kStr, kCustom
+  Type = ref object
+    case kind: Kind
+    of kCustom:
+      symbol: NimNode
+      args: seq[NimNode]
+    else:
+      size: BiggestInt
     endian: Endianness
     bitEndian: Endianness
   Operations = OrderedTable[string, NimNode]
@@ -325,7 +327,12 @@ type
     case repeat: Repeat
     of rFor, rUntil: repeatExpr: NimNode
     of rNo: discard
-    value: NimNode
+    valueExpr: NimNode
+    sizeExpr: NimNode
+  Field = tuple
+    typ: Type
+    opts: Operations
+    val: Value
 
 const defaultOptions: Options = (
   endian: bigEndian,
@@ -337,19 +344,52 @@ macro typeGetter*(body: typed): untyped =
 
 proc syntaxError() = raise newException(Defect, "Invalid syntax")
 
-proc prefixFields(node: var NimNode, seenFields, params: seq[string], parent: NimNode) =
+proc getImpl(typ: Type): NimNode = # TODO
+  case typ.kind
+  of kInt, kUInt:
+    var s = ""
+    if typ.kind == kUInt:
+      s &= "u"
+    s &= "int"
+    if typ.size == 0: discard
+    elif typ.size > 32: s &= "64"
+    elif typ.size > 16: s &= "32"
+    elif typ.size > 8: s &= "16"
+    else: s &= "8"
+    result = ident(s)
+  of kFloat:
+    result = ident("float" & $typ.size)
+  of kStr:
+    result = ident"string"
+  of kCustom:
+    var sym = typ.symbol
+    result = quote do: typeGetter(`sym`)
+
+proc prefixFields(node: var NimNode, st, params: seq[string], with: NimNode) =
   if node.kind == nnkIdent:
-    if node.strVal in seenFields:
-      node = newDotExpr(parent, node)
+    if node.strVal in st:
+      node = newDotExpr(with, node)
   elif node.kind == nnkDotExpr and node[0].strVal in params:
     return
   else:
     var i = 0
     while i < len(node):
       var n = node[i]
-      prefixFields(n, seenFields, params, parent)
+      prefixFields(n, st, params, with)
       node[i] = n.copyNimTree
       inc i
+
+proc getCustomReader(typ: Type, bs: NimNode, st, params: seq[string]): NimNode =
+  result = newCall(nnkDotExpr.newTree(typ.symbol, ident"get"), bs)
+  for arg in typ.args:
+    result.add(arg)
+  result.prefixFields(st, params, ident"result")
+
+proc getCustomWriter(typ: Type, bs: NimNode, st, params: seq[string]): NimNode =
+  result = newCall(nnkDotExpr.newTree(typ.symbol, ident"put"), bs)
+  for arg in typ.args:
+    result.add(arg)
+  result.prefixFields(st, params, ident"input")
 
 proc replaceWith(node: var NimNode; what, with: NimNode) =
   if node.kind == nnkIdent:
@@ -363,46 +403,33 @@ proc replaceWith(node: var NimNode; what, with: NimNode) =
       node[i] = n
       inc i
 
-proc containSize(size: BiggestInt): string =
-  if size == 0: ""
-  elif size > 32: "64"
-  elif size > 16: "32"
-  elif size > 8: "16"
-  else: "8"
-
-proc decodeType(t, bs: NimNode; seenFields, params: seq[string]; opts: Options): Type =
+proc decodeType(t: NimNode; seenFields, params: seq[string]; opts: Options): Type =
+  result = Type()
   var
-    kind: Kind
-    impl: NimNode
-    size: BiggestInt
     endian = opts.endian
     bitEndian = opts.bitEndian
-    customReader, customWriter: NimNode
   case t.kind
   of nnkIntLit:
-    size = t.intVal
-    kind = kI
-    impl = ident("int" & containSize(size))
-    if size > 64:
+    result.kind = kInt
+    result.size = t.intVal
+    if result.size > 64:
       raise newException(Defect, "Unable to parse values larger than 64 bits")
   of nnkIdent:
-    kind = kI
     var
+      kind = kInt
       letters: set[char]
-      kindPrefix = "int"
+      size: int
     for i, c in t.strVal:
       case c
       of 'u', 'f', 's':
         if letters * {'u', 'f', 's'} != {}:
           raise newException(Defect, "Type was specified more than once")
         if c == 'u':
-          kind = kU
-          kindPrefix = "uint"
+          kind = kUInt
         elif c == 'f':
-          kind = kF
-          kindPrefix = "float"
+          kind = kFloat
         elif c == 's':
-          kind = kS
+          kind = kStr
       of 'l', 'b':
         if letters * {'l', 'b'} != {}:
           raise newException(Defect, "Endianness was specified more than once")
@@ -419,71 +446,59 @@ proc decodeType(t, bs: NimNode; seenFields, params: seq[string]; opts: Options):
         else:
           bitEndian = littleEndian
       else:
-        try: size = t.strVal[i..^1].parseBiggestInt
+        try: size = t.strVal[i..^1].parseInt
         except ValueError:
           raise newException(Defect, &"Format {t.strVal} not supported")
         break
       letters.incl c
-    impl = if 's' in letters: ident"string"
-           else: ident(kindPrefix & containSize(size))
+    result.kind = kind
+    result.size = size
     if letters * {'l', 'b'} != {} and 's' in letters:
       raise newException(Defect, "Endianness for strings is not supported")
     if size > 64:
       raise newException(Defect, "Unable to parse values larger than 64 bits")
-    if kind in {kI, kU, kF} and size == 0:
+    if kind in {kInt, kUInt, kFloat} and size == 0:
       raise newException(Defect, "Unable to parse values with size 0")
-    if kind == kF and size != 32 and size != 64:
+    if kind == kFloat and size != 32 and size != 64:
       raise newException(Defect, "Only 32 and 64 bit floats are supported")
-    if kind == kS and size mod 8 != 0:
+    if kind == kStr and size mod 8 != 0:
       raise newException(Defect, "Unaligned strings are not supported")
     if letters * {'l', 'b'} != {} and (size == 8 or size mod 8 != 0):
       raise newException(Defect, "l/b is only valid for multiple-of-8 sizes")
   of nnkCall:
-    var t0 = t[0]
-    kind = kC
-    impl = quote do: typeGetter(`t0`)
-    customReader = newCall(nnkDotExpr.newTree(t[0], ident"get"), bs)
-    customWriter = newCall(nnkDotExpr.newTree(t[0], ident"put"), bs)
+    result.kind = kCustom
+    result.symbol = t[0]
     var i = 1
     while i < t.len:
-      var
-        readArg = t[i].copyNimTree
-        writeArg = t[i].copyNimTree
-      customReader.add(readArg)
-      customWriter.add(writeArg)
+      result.args.add(t[i].copyNimTree)
       inc i
-    customReader.prefixFields(seenFields, params, ident"result")
-    customWriter.prefixFields(seenFields, params, ident"input")
   else:
     syntaxError()
-  result = (
-    kind: kind,
-    impl: impl,
-    customReader: customReader,
-    customWriter: customWriter,
-    size: size,
-    endian: endian,
-    bitEndian: bitEndian)
+  result.endian = endian
+  result.bitEndian = bitEndian
 
 proc decodeOperations(node: NimNode): Operations =
   result = initOrderedTable[string, NimNode]()
   for child in node:
     result[child[0].strVal] = child[1]
 
-proc decodeValue(node: NimNode, seenFields, params: seq[string]): Value =
+proc decodeValue(node: NimNode, st: var seq[string], params: seq[string]): Value =
+  # sizeExpr: NimNode
   var node = node
   result = Value()
   if node.kind == nnkAsgn:
-    result.value = node[1]
-    prefixFields(result.value, seenFields, params, ident"result")
+    result.valueExpr = node[1]
+    prefixFields(result.valueExpr, st, params, ident"result")
     node = node[0]
   if node.kind == nnkIdent:
     result.repeat = rNo
     if node.strVal != "_":
       result.name = node.strVal
+      st.add(result.name)
   else:
     if node[0].strVal != "_":
       result.name = node[0].strVal
+      st.add(result.name)
     case node.kind
     of nnkBracketExpr:
       result.repeat = rFor
@@ -493,22 +508,87 @@ proc decodeValue(node: NimNode, seenFields, params: seq[string]): Value =
       syntaxError()
     result.repeatExpr = node[1]
 
-proc createReadStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
+proc decodeHeader(input: seq[NimNode]): tuple[params: seq[NimNode], opts: Options] =
+  result.opts = defaultOptions
+  var specifiedOpts: set[OptionSet]
+  for n in input:
+    case n.kind
+    of nnkExprColonExpr:
+      result.params.add(newIdentDefs(n[0], n[1]))
+    of nnkExprEqExpr:
+      case n[0].strVal
+      of "endian":
+        if osEndian in specifiedOpts:
+          raise newException(Defect,
+            "Option 'endian' was specified more than once")
+        case n[1].strVal
+        of "b": result.opts.endian = bigEndian
+        of "l": result.opts.endian = littleEndian
+        else:
+          raise newException(Defect,
+            "Invalid value for endian option (valid values: l, b)")
+        specifiedOpts.incl osEndian
+      of "bitEndian":
+        if osBitEndian in specifiedOpts:
+          raise newException(Defect,
+            "Option 'bitEndian' was specified more than once")
+        case n[1].strVal
+        of "n": result.opts.bitEndian = bigEndian
+        of "r": result.opts.bitEndian = littleEndian
+        else:
+          raise newException(Defect,
+            "Invalid value for 'bitEndian' option (valid values: n, r)")
+        specifiedOpts.incl osBitEndian
+      else:
+        raise newException(Defect, &"Unknown option: {$n[0]}")
+    else:
+      syntaxError()
+
+proc decodeField(def: NimNode, st: var seq[string], params: seq[string],
+                 opts: Options): Field =
+  var a, b, c: NimNode
+  case def.kind
+  of nnkPrefix:
+    c = def[2][0].copyNimTree
+    case def[1].kind
+    of nnkIdent:
+      a = newCall(def[1].copyNimTree)
+    of nnkCall:
+      a = def[1].copyNimTree
+    of nnkCommand:
+      a = def[1][0].copyNimTree
+      b = def[1][1].copyNimTree
+    else: syntaxError()
+  of nnkCall:
+    a = def[0].copyNimTree
+    c = def[1][0].copyNimTree
+  of nnkCommand:
+    a = def[0].copyNimTree
+    b = def[1].copyNimTree
+    c = def[2][0].copyNimTree
+  else: syntaxError()
+  result = (
+    decodeType(a, st, params, opts),
+    decodeOperations(b),
+    decodeValue(c, st, params))
+
+proc createReadStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): NimNode {.compileTime.} =
   result = newStmtList()
   let
     kind = typ.kind
-    impl = typ.impl
-    size = typ.size
-    sizeNode = newLit(size.int)
+    impl = typ.getImpl
     endian = if typ.endian == littleEndian: 'l' else: 'b'
     endianNode = newLit(typ.endian)
     bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
     procUnaligned = ident("readbits" & bitEndian & "e")
-    procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`, `endianNode`)
   case kind
-  of kI, kU:
+  of kInt, kUInt:
+    let
+      size = typ.size
+      sizeNode = newLit(size.int)
+      procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`, `endianNode`)
     if size in {8, 16, 32, 64}:
-      let numKind = if kind == kI: 's' else: 'u'
+      let numKind = if kind == kInt: 's' else: 'u'
       var procAlignedStr = "read" & numKind & $size
       if size != 8: procAlignedStr &= endian & "e"
       let procAligned = ident(procAlignedStr)
@@ -522,9 +602,12 @@ proc createReadStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
         if isAligned(`bs`):
           resetBuffer(`bs`)
         `sym` = `impl`(`procUnalignedCall`))
-  of kF:
+  of kFloat:
     let
+      size = typ.size
+      sizeNode = newLit(size.int)
       procAligned = ident("readf" & $size & endian & "e")
+      procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`, `endianNode`)
       floatCast =
         if size == 64: quote do: cast[float64](`procUnalignedCall`)
         else: quote do: float32(cast[float64](`procUnalignedCall`))
@@ -533,7 +616,9 @@ proc createReadStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
         `sym` = `procAligned`(`bs`)
       else:
         `sym` = `floatCast`)
-  of kS:
+  of kStr:
+    discard
+    #[
     result.add((quote do:
       if not isAligned(`bs`):
         raise newException(IOError, "Stream must be aligned to read a string")),
@@ -541,24 +626,25 @@ proc createReadStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
         quote do: `sym` = readStr(`bs`)
       else:
         quote do: `sym` = readStr(`bs`, `sizeNode`))
-  of kC:
-    let call = typ.customReader
+    ]#
+  of kCustom:
+    let call = getCustomReader(typ, bs, st, params)
     result.add(quote do: `sym` = `call`)
 
-proc createWriteStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} =
+proc createWriteStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): NimNode {.compileTime.} =
   result = newStmtList()
   let
     kind = typ.kind
-    impl = typ.impl
-    size = typ.size
-    sizeNode = newLit(size.int)
-    lenNode = newLit(size.int div 8)
+    impl = typ.getImpl
     endian = if typ.endian == littleEndian: 'l' else: 'b'
     endianNode = newLit(typ.endian)
     bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
   case kind
-  of kI, kU, kF:
-    let procUnaligned = ident("writebits" & bitEndian & "e")
+  of kInt, kUInt, kFloat:
+    let
+      size = typ.size
+      sizeNode = newLit(size.int)
+      procUnaligned = ident("writebits" & bitEndian & "e")
     if sym == nil:
       result.add(quote do:
         `procUnaligned`(`bs`, `sizeNode`, 0))
@@ -575,7 +661,10 @@ proc createWriteStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} 
             `procUnaligned`(`bs`, `sizeNode`, `tmp`, `endianNode`))
       else:
         result.add(quote do: `procUnaligned`(`bs`, `sizeNode`, `tmp`, `endianNode`))
-  of kS:
+  of kStr:
+    discard
+    #[
+    let lenNode = newLit(size.int div 8)
     if size == 0 and sym == nil:
       raise newException(Defect,
         "Null-terminated strings must have a name or value")
@@ -595,202 +684,142 @@ proc createWriteStatement(sym, bs: NimNode, typ: Type): NimNode {.compileTime.} 
         quote do:
           var `tmp` = `sym`
           writeStr(`bs`, `tmp`))
-  of kC:
-    let call = typ.customWriter
+    ]#
+  of kCustom:
+    let call = getCustomWriter(typ, bs, st, params)
     call.insert(2, sym)
     result.add(quote do: `call`)
 
-macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
+macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
   ## The main macro in this module. It takes the ``name`` of the tuple to
   ## create along with a block on the format described above and creates a
   ## reader and a writer for it. The output is a tuple with ``name`` that has
   ## two fields ``get`` and ``put``. Get is on the form
   ## ``proc (bs: BitStream): tuple[<fields>]`` and put is
   ## ``proc (bs: BitStream, input: tuple[<fields>])``
-  let
-    body = paramsAndDef[^1]
-    res = ident"result"
-    bs = ident"s"
-    input = ident"input"
   var
+    tupleMeat = newTree(nnkTupleTy)
+    fieldsSymbolTable = newSeq[string]()
     reader = newStmtList()
     writer = newStmtList()
-    tupleMeat = newTree(nnkTupleTy)
-    i = 0
-    fidx = 0
-    seenFields = newSeq[string]()
-    extraParams = newSeq[NimNode]()
-    params = newSeq[string]()
-    opts = defaultOptions
-    specifiedOpts: set[OptionSet]
-  while i < paramsAndDef.len - 1:
-    let p = paramsAndDef[i]
-    case p.kind
-    of nnkExprColonExpr:
-      extraParams.add(newIdentDefs(p[0], p[1]))
-      params.add(p[0].strVal)
-    of nnkExprEqExpr:
-      case p[0].strVal
-      of "endian":
-        if osEndian in specifiedOpts:
-          raise newException(Defect,
-            "Option 'endian' was specified more than once")
-        case p[1].strVal
-        of "b": opts.endian = bigEndian
-        of "l": opts.endian = littleEndian
-        else:
-          raise newException(Defect,
-            "Invalid value for endian option (valid values: l, b)")
-        specifiedOpts.incl osEndian
-      of "bitEndian":
-        if osBitEndian in specifiedOpts:
-          raise newException(Defect,
-            "Option 'bitEndian' was specified more than once")
-        case p[1].strVal
-        of "n": opts.bitEndian = bigEndian
-        of "r": opts.bitEndian = littleEndian
-        else:
-          raise newException(Defect,
-            "Invalid value for 'bitEndian' option (valid values: n, r)")
-        specifiedOpts.incl osBitEndian
-      else:
-        raise newException(Defect, &"Unknown option: {$p[0]}")
-    else:
-      syntaxError()
-    inc i
-  i = 0
-  while i < body.len:
-    var
-      def = body[i].copyNimTree
-      a, b, c: NimNode
-    case def.kind
-    of nnkPrefix:
-      c = def[2][0].copyNimTree
-      case def[1].kind
-      of nnkIdent:
-        a = newCall(def[1].copyNimTree)
-      of nnkCall:
-        a = def[1].copyNimTree
-      of nnkCommand:
-        a = def[1][0].copyNimTree
-        b = def[1][1].copyNimTree
-      else: syntaxError()
-    of nnkCall:
-      a = def[0].copyNimTree
-      c = def[1][0].copyNimTree
-    of nnkCommand:
-      a = def[0].copyNimTree
-      b = def[1].copyNimTree
-      c = def[2][0].copyNimTree
-    else: syntaxError()
+  let
+    res = ident"result"
+    input = ident"input"
+    bs = ident"s"
+    (params, parserOptions) = decodeHeader(rest[0 .. ^2])
+    paramsSymbolTable = collect(newSeq):
+      for p in params:
+        p[0].strVal
+    fields = collect(newSeq):
+      for def in rest[^1]:
+        decodeField(def, fieldsSymbolTable, paramsSymbolTable, parserOptions)
+  for f in fields:
     let
-      typ = decodeType(a, bs, seenFields, params, opts)
-      ops = decodeOperations(b)
-      val = decodeValue(c, seenFields, params)
-      impl = typ.impl
-      field = val.name
-      value = val.value
-    var rSym, wSym: NimNode
-    let
+      impl = f.typ.getImpl
+      field = f.val.name
+      fieldIdent = ident(field)
+      value = f.val.valueExpr
       rTmp = genSym(nskVar)
       wTmp = genSym(nskVar)
-    if val.repeat == rNo:
-      reader.add(quote do:
-        var `rTmp`: `impl`)
-      rSym = rTmp
-      wSym = if field == "":
-               if value == nil: nil
-               else: value
-             else: quote do: `input`[`fidx`]
-      reader.add createReadStatement(rSym, bs, typ)
-      writer.add createWriteStatement(wSym, bs, typ)
+    if f.val.repeat == rNo:
+      block generateRead:
+        reader.add(quote do:
+          var `rTmp`: `impl`)
+        reader.add createReadStatement(rTmp, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
+      block generateWrite:
+        let sym = if field == "": (if value == nil: nil else: value)
+                  else: quote do: `input`.`fieldIdent`
+        writer.add createWriteStatement(sym, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
       if field != "":
-        tupleMeat.add(nnkIdentDefs.newTree(ident(field), impl, newEmptyNode()))
-        seenFields.add(field)
+        tupleMeat.add(newIdentDefs(ident(field), impl))
     else:
       reader.add(quote do:
         var `rTmp`: seq[`impl`])
       var
-        rExpr = val.repeatExpr.copyNimTree
-        wExpr = val.repeatExpr.copyNimTree
-      rExpr.prefixFields(seenFields, params, res)
-      wExpr.prefixFields(seenFields, params, input)
-      case val.repeat
+        rExpr = f.val.repeatExpr.copyNimTree
+        wExpr = f.val.repeatExpr.copyNimTree
+      rExpr.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
+      wExpr.prefixFields(fieldsSymbolTable, paramsSymbolTable, input)
+      case f.val.repeat
       of rFor:
-        let
-          rLoopIdx = genSym(nskForVar)
-          wLoopElem = genSym(nskForVar)
-
-        rSym = quote do: `rTmp`[`rLoopIdx`]
-        let readStmt = createReadStatement(rSym, bs, typ)
-        reader.add(quote do:
-          `rTmp` = newSeq[`impl`](`rExpr`)
-          for `rLoopIdx` in 0 ..< int(`rExpr`): `readStmt`)
-        wSym = quote do: `wLoopElem`
-        writer.add(
-          if val.name == "":
-            if value == nil:
-              quote do:
-                var `wTmp` = newSeq[`impl`](`wExpr`)
+        block generateRead:
+          let
+            loopIdx = genSym(nskForVar)
+            sym = quote do: `rTmp`[`loopIdx`]
+            readStmt = createReadStatement(sym, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
+          reader.add(quote do:
+            `rTmp` = newSeq[`impl`](`rExpr`)
+            for `loopIdx` in 0 ..< int(`rExpr`):
+              `readStmt`)
+        block generateWrite:
+          let sym = genSym(nskForVar)
+          writer.add(
+            if field == "":
+              if value == nil:
+                quote do:
+                  var `wTmp` = newSeq[`impl`](`wExpr`)
+              else:
+                quote do:
+                  var `wTmp` = `value`
             else:
               quote do:
-                var `wTmp` = `value`
-          else:
-            quote do:
-              var `wTmp` = `input`[`fidx`])
-        let writeStmt = createWriteStatement(wSym, bs, typ)
-        writer.add(quote do:
-          for `wLoopElem` in `wTmp`: `writeStmt`)
+                var `wTmp` = `input`.`fieldIdent`)
+          let
+            loopElem = genSym(nskForVar)
+            writeStmt = createWriteStatement(loopElem, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
+          writer.add(quote do:
+            for `loopElem` in `wTmp`:
+              `writeStmt`)
       of rUntil:
-        let
-          rLoopIdx = genSym(nskVar)
-          wLoopIdx = genSym(nskForVar)
-          wLoopElem = genSym(nskForVar)
-        rSym = genSym(nskVar)
-        rExpr.replaceWith(ident"e", rSym)
-        rExpr.replaceWith(ident"i", rLoopIdx)
-        rExpr.replaceWith(ident"s", bs)
-        let readStmt = createReadStatement(rSym, bs, typ)
-        reader.add (quote do:
-          `rTmp` = newSeq[`impl`]()
-          var
-            `rLoopIdx`: int
-            `rSym`: `impl`
-          while true:
-            `readStmt`
-            `rTmp`.add(`rSym`)
-            inc `rLoopIdx`
-            if `rExpr`: break)
-        wSym = wLoopElem
-        wExpr.replaceWith(ident"e", wSym)
-        wExpr.replaceWith(ident"i", wLoopIdx)
-        wExpr.replaceWith(ident"s", bs)
-        writer.add(
-          if val.name == "":
-            if value == nil:
-              quote do:
-                var `wTmp` = newSeq[`impl`](`wExpr`)
+        block generateRead:
+          let
+            sym = genSym(nskVar)
+            loopIdx = genSym(nskVar)
+          rExpr.replaceWith(ident"e", sym)
+          rExpr.replaceWith(ident"i", loopIdx)
+          rExpr.replaceWith(ident"s", bs)
+          let readStmt = createReadStatement(sym, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
+          reader.add (quote do:
+            `rTmp` = newSeq[`impl`]()
+            var
+              `loopIdx`: int
+              `sym`: `impl`
+            while true:
+              `readStmt`
+              `rTmp`.add(`sym`)
+              inc `loopIdx`
+              if `rExpr`: break)
+        block generateWrite:
+          let
+            sym = genSym(nskForVar)
+            loopIdx = genSym(nskForVar)
+          wExpr.replaceWith(ident"e", sym)
+          wExpr.replaceWith(ident"i", loopIdx)
+          wExpr.replaceWith(ident"s", bs)
+          writer.add(
+            if field == "":
+              if value == nil:
+                quote do:
+                  var `wTmp` = newSeq[`impl`](`wExpr`)
+              else:
+                quote do:
+                  var `wTmp` = `value`
             else:
               quote do:
-                var `wTmp` = `value`
-          else:
-            quote do:
-              var `wTmp` = `input`[`fidx`])
-        let writeStmt = createWriteStatement(wSym, bs, typ)
-        writer.add(quote do:
-          for `wLoopIdx`, `wLoopElem` in `wTmp`: `writeStmt`)
+                var `wTmp` = `input`.`fieldIdent`)
+          let writeStmt = createWriteStatement(sym, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
+          writer.add(quote do:
+            for `loopIdx`, `sym` in `wTmp`: `writeStmt`)
       else: discard
       if field != "":
-        tupleMeat.add(nnkIdentDefs.newTree(
-                      ident(field), quote do: seq[`impl`], newEmptyNode()))
-        seenFields.add(field)
+        tupleMeat.add(newIdentDefs(ident(field), quote do: seq[`impl`]))
     if value != nil:
       reader.add(quote do:
         if `rTmp` != (`value`):
           raise newException(MagicError, "field '" & $`field` & "' was " &
                             $`rTmp` & " instead of " & $`value`))
     if field != "":
-      reader.add(quote do: `res`[`fidx`] = `rTmp`)
+      reader.add(quote do: `res`.`fieldIdent` = `rTmp`)
     when defined(binaryparseLog):
       # This can be used for debugging, should possibly be exposed by a flag
       reader.add(quote do:
@@ -798,21 +827,19 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           echo "Done reading field " & $`i` & ": " & $`res`[`field`]
         else:
           echo "Done reading field " & $`i`)
-    inc i
-    if field != "": inc fidx
   let
     readerName = genSym(nskProc)
     writerName = genSym(nskProc)
   if tupleMeat.len == 0:
     let dummy = genSym(nskField)
-    tupleMeat.add(nnkIdentDefs.newTree(dummy, ident"int", newEmptyNode()))
+    tupleMeat.add(newIdentDefs(dummy, ident"int"))
   result = quote do:
     proc `readerName`(`bs`: BitStream): `tupleMeat` =
       `reader`
     proc `writerName`(`bs`: BitStream, `input`: `tupleMeat`) =
       `writer`
     let `name` = (get: `readerName`, put: `writerName`)
-  for p in extraParams:
+  for p in params:
     result[0][3].add p.copyNimTree
     result[1][3].add p.copyNimTree
 
