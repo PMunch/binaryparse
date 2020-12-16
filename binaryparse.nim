@@ -509,7 +509,7 @@ proc decodeValue(node: NimNode, st: var seq[string], params: seq[string]): Value
   if node.kind == nnkAsgn:
     result.valueExpr = node[1]
     node = node[0]
-  if node.kind == nnkBracket:
+  if node.kind == nnkCurly:
     if result.valueExpr != nil:
       raise newException(Defect,
         "Magic and assertion can't be used together in the same field")
@@ -596,19 +596,19 @@ proc decodeField(def: NimNode, st: var seq[string], params: seq[string],
     decodeOperations(b),
     decodeValue(c, st, params))
 
-proc createReadStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): NimNode {.compileTime.} =
+proc createReadStatement(sym, bs: NimNode, f: Field, st, params: seq[string]): NimNode {.compileTime.} =
   result = newStmtList()
   let
-    kind = typ.kind
-    impl = typ.getImpl
-    endian = if typ.endian == littleEndian: 'l' else: 'b'
-    endianNode = newLit(typ.endian)
-    bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
+    kind = f.typ.kind
+    impl = f.typ.getImpl
+    endian = if f.typ.endian == littleEndian: 'l' else: 'b'
+    endianNode = newLit(f.typ.endian)
+    bitEndian = if f.typ.bitEndian == littleEndian: 'l' else: 'b'
     procUnaligned = ident("readbits" & bitEndian & "e")
   case kind
   of kInt, kUInt:
     let
-      size = typ.size
+      size = f.typ.size
       sizeNode = newLit(size.int)
       procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`, `endianNode`)
     if size in {8, 16, 32, 64}:
@@ -628,7 +628,7 @@ proc createReadStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): 
         `sym` = `impl`(`procUnalignedCall`))
   of kFloat:
     let
-      size = typ.size
+      size = f.typ.size
       sizeNode = newLit(size.int)
       procAligned = ident("readf" & $size & endian & "e")
       procUnalignedCall = quote do: `procUnaligned`(`bs`, `sizeNode`, `endianNode`)
@@ -641,12 +641,19 @@ proc createReadStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): 
       else:
         `sym` = `floatCast`)
   of kStr:
-    result.add((quote do:
+    let expr = f.val.valueExpr
+    result.add(quote do:
       if not isAligned(`bs`):
-        raise newException(IOError, "Stream must be aligned to read a string")),
-      quote do: `sym` = readStr(`bs`))
+        raise newException(IOError, "Stream must be aligned to read a string"))
+    result.add(
+      if expr != nil:
+        quote do:
+          `sym` = readStr(`bs`, 8 * `expr`.len)
+      else:
+        quote do:
+          `sym` = readStr(`bs`))
   of kCustom:
-    let call = getCustomReader(typ, bs, st, params)
+    let call = getCustomReader(f.typ, bs, st, params)
     result.add(quote do: `sym` = `call`)
 
 proc createWriteStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): NimNode {.compileTime.} =
@@ -706,7 +713,7 @@ proc createReadField(f: Field, bs: NimNode, st: var seq[string], params: seq[str
   if f.val.repeat == rNo:
     result.add(quote do:
       var `tmp`: `impl`)
-    result.add createReadStatement(tmp, bs, f.typ, st, params)
+    result.add createReadStatement(tmp, bs, f, st, params)
   else:
     result.add(quote do:
       var `tmp`: seq[`impl`])
@@ -717,7 +724,7 @@ proc createReadField(f: Field, bs: NimNode, st: var seq[string], params: seq[str
       let
         loopIdx = genSym(nskForVar)
         sym = quote do: `tmp`[`loopIdx`]
-        readStmt = createReadStatement(sym, bs, f.typ, st, params)
+        readStmt = createReadStatement(sym, bs, f, st, params)
       result.add(quote do:
         `tmp` = newSeq[`impl`](`expr`)
         for `loopIdx` in 0 ..< int(`expr`):
@@ -729,7 +736,7 @@ proc createReadField(f: Field, bs: NimNode, st: var seq[string], params: seq[str
       expr.replaceWith(ident"e", sym)
       expr.replaceWith(ident"i", loopIdx)
       expr.replaceWith(ident"s", bs)
-      let readStmt = createReadStatement(sym, bs, f.typ, st, params)
+      let readStmt = createReadStatement(sym, bs, f, st, params)
       result.add (quote do:
         `tmp` = newSeq[`impl`]()
         var
