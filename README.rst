@@ -220,7 +220,7 @@ achieved with one of the following:
 
     s: a # a null-terminated string
     s: _ # error: encoder unknows how many bytes to encode
-    s: b(5) # string of length 5 (end of substream marks termination)
+    s: b(5) # string of length 5 (either null byte or end of substream terminates it)
     s: c = "ABC" # reads a string of length 3 that must match "ABC"
     s: d # reads a string until next field is matched
     s: _ = "MAGIC"
