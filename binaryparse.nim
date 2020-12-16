@@ -132,7 +132,7 @@
 ##   times
 ## - ``until``: append ``{expr}`` to the name for repeating until
 ##   ``expr`` is evaluated to ``true``
-## - ``magic``: enclose name with ``[]`` and use assertion with
+## - ``magic``: enclose name with ``{}`` and use assertion with
 ##   your **next** field
 ##
 ## In until repetition you can use 3 special symbols:
@@ -145,7 +145,7 @@
 ##
 ##     8: a[5] # reads 5 8-bit integers
 ##     8: b{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
-##     8: [c] # reads 8-bit integers until next field is matched
+##     8: {c} # reads 8-bit integers until next field is matched
 ##     3: _ = 0b111 # magic value can be of any type
 ##
 ## Substreams
@@ -187,7 +187,7 @@
 ##     s: d # reads a string until next field is matched
 ##     s: _ = "MAGIC"
 ##     s: e[5] # reads 5 null-terminated strings
-##     s: [d] # reads null-terminated strings until next field matches
+##     s: {d} # reads null-terminated strings until next field matches
 ##     3: term = 0b111 # terminator of the above sequence
 ##
 ## Clarifications:
