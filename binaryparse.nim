@@ -510,10 +510,11 @@ proc decodeValue(node: NimNode, st: var seq[string], params: seq[string]): Value
     result.valueExpr = node[1]
     node = node[0]
   if node.kind == nnkBracket:
-    result.isMagic = true
     if result.valueExpr != nil:
       raise newException(Defect,
         "Magic and assertion can't be used together in the same field")
+    result.isMagic = true
+    node = node[0]
   if node.kind == nnkBracketExpr:
     result.repeat = rFor
     result.repeatExpr = node[1]
@@ -762,9 +763,6 @@ proc createWriteField(f: Field, bs: NimNode, st: var seq[string], params: seq[st
     let sym = if field == "": (if value == nil: nil else: value)
               else: quote do: `input`.`fieldIdent`
     result.add createWriteStatement(sym, bs, f.typ, st, params)
-    if f.typ.kind == kStr and f.val.valueExpr == nil and not f.val.isMagic:
-      result.add(quote do:
-        writeBe(`bs`, 0'u8))
   else:
     var expr = f.val.repeatExpr.copyNimTree
     expr.prefixFields(st, params, input)
@@ -834,7 +832,10 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
   for f in fields:
     let field = f.val.name
     if field != "":
-      tupleMeat.add(newIdentDefs(ident(field), f.typ.getImpl))
+      var fieldTypeImpl = f.typ.getImpl
+      if f.val.repeat != rNo:
+        fieldTypeImpl = quote do: seq[`fieldTypeImpl`]
+      tupleMeat.add(newIdentDefs(ident(field), fieldTypeImpl))
     if f.val.sizeExpr != nil:
       let size = f.val.sizeExpr
       block generateRead:
@@ -849,8 +850,10 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
           ss = genSym(nskVar)
           wf = createWriteField(f, ss, fieldsSymbolTable, paramsSymbolTable)
         writer.add(quote do:
-          var `ss` = createSubstream(`bs`, `size`)
-          `wf`)
+          var `ss` = newPaddedBitStream(`size`)
+          `wf`
+          `ss`.seek(0)
+          `bs`.writeFromSubstream(`ss`))
     else:
       block generateRead:
         reader.add createReadField(f, bs, fieldsSymbolTable, paramsSymbolTable)

@@ -1,12 +1,12 @@
 import ../binaryparse, bitstreams, unittest
-
+#[
 suite "Aligned":
   createParser(p):
     16: beword
     l32: ledword
     f32: befloat
     lf64: ledouble
-    s24: str
+    s: str(3)
     s: term
   var fbs = newFileBitStream("tests/aligned.hex")
   defer: close(fbs)
@@ -100,7 +100,34 @@ suite "Complex":
       echo getCurrentExceptionMsg()
       fail()
     check data == outer.get(sbs)
-
+]#
+suite "Assertions":
+  createParser(inner):
+    8: bytes[4]
+  createParser(outer):
+    s24: str = "ABC"
+    8: x = 1
+    8: y = 2
+    8: z = x + y
+    *inner: bytes = (@[0'i8, 1, 2, 3],)
+  var fbs = newFileBitStream("tests/assertions.hex")
+  defer: close(fbs)
+  var data: typeGetter(outer)
+  try: data = outer.get(fbs)
+  except:
+    echo getCurrentExceptionMsg()
+    fail()
+  test "serialization":
+    var sbs = newStringBitStream()
+    defer: close(sbs)
+    try:
+      outer.put(sbs, data)
+      sbs.seek(0)
+    except:
+      echo getCurrentExceptionMsg()
+      fail()
+    check data == outer.get(sbs)
+#[
 suite "Repetition":
   createParser(p):
     8: size
@@ -131,33 +158,6 @@ suite "Repetition":
       echo getCurrentExceptionMsg()
       fail()
     check data == p.get(sbs)
-
-suite "Assertions":
-  createParser(inner):
-    8: bytes[4]
-  createParser(outer):
-    s24: str = "ABC"
-    8: x = 1
-    8: y = 2
-    8: z = x + y
-    *inner: bytes = (@[0'i8, 1, 2, 3],)
-  var fbs = newFileBitStream("tests/assertions.hex")
-  defer: close(fbs)
-  var data: typeGetter(outer)
-  try: data = outer.get(fbs)
-  except:
-    echo getCurrentExceptionMsg()
-    fail()
-  test "serialization":
-    var sbs = newStringBitStream()
-    defer: close(sbs)
-    try:
-      outer.put(sbs, data)
-      sbs.seek(0)
-    except:
-      echo getCurrentExceptionMsg()
-      fail()
-    check data == outer.get(sbs)
 
 suite "Unnamed fields":
   createParser(p):
@@ -218,3 +218,4 @@ suite "Parser options":
       echo getCurrentExceptionMsg()
       fail()
     check data == p.get(sbs)
+]#
