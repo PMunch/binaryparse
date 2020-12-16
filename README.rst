@@ -73,47 +73,87 @@ You can order options however you want, but size must come last (e.g. ``lru16`` 
 Value
 ~~~~~
 
-This section consists of a the following attributes in order:
+This section includes the following features (only name is mandatory):
 
-- **name** for the field (mandatory)
-- substream **size** (optional)
-- **repetition** (optional)
-- **assertion** optional)
+- name
+- repetition
+- assertion
 
-For primitive types (except null-terminated strings) you can instruct
-binaryparse to not produce a symbol and discard the field by using ``_``
-for the name:
+If you don't *really* want a name, you can discard the symbol by using ``_`` in its place:
 
 .. code:: nim
 
-    createParser(magic):
+    createParser(myParser):
       8: _
 
-Strings
-~~~~~~~
+Alignment
+~~~~~~~~~
 
-You can use call syntax to specify length or an assertion to specify an exact expected value (see below),
-otherwise strings they are null-terminated:
+If any of the following is violated, binaryparse should generate an exception:
+
+- Byte endianness can only be used with byte-multiple integers
+- Bit endianness must be uniform between **byte boundaries**
+- Spec must finish on a byte boundary
 
 .. code:: nim
 
-    s: s(5) # a string of length 5
-    s: term # a null-terminated string
-    s: _ = "MAGIC" # a string that must match the value "MAGIC"
-    s: m() # a string that is terminated when a value matches the next field
-    16: x = 0xABCD
-    s: arr1[5] # a seq of 5 null-terminated strings
-    s: arr2(4)[5] # a seq of 5 strings each one of which has length 4
-    s: arr3[] # a seq of null-terminated strings until next field is matched
-    16: _ = x + 3
-    s: arr4(x)[] # a seq of strings of length x until next field is matched
-    f32: _ = 2.5
+   createParser(myParser, bitEndian = n):
+     b9: a # error: cannot apply byte endianness
+     r6: b # error: shares bits with previous byte
+     10: c # error: spec does not finish on a byte boundary
+
+Moreover, unaligned reads for strings are not supported:
+
+.. code:: nim
+
+    createParser(myParser):
+      6: x
+      s: y # invalid, generates an exception
+
+Assertion
+~~~~~~~~~
+
+Use ``= expr`` for producing an exception if the parsed value doesn't
+match ``expr``:
+
+.. code:: nim
+
+    s: x = "binaryparse is awesome"
+    8: y[5] = @[0, 1, 2, 3, 4]
+
+Assertion can also be used in a special manner to terminate the previous
+field if it's a **string** or a **sequence indicated as magic-terminated**.
+This is discussed in later sections.
+
+Repetition
+~~~~~~~~~~
+
+There are 3 ways to produce a ``seq`` of your ``Type``:
+
+- ``for``: append ``[expr]`` to the name for repeating ``expr``
+  times
+- ``until``: append ``{expr}`` to the name for repeating until
+  ``expr`` is evaluated to ``true``
+- ``magic``: enclose name with ``[]`` and use assertion with
+  your **next** field
+
+In until repetition you can use 3 special symbols:
+
+- ``e``: means 'last element read'
+- ``i``: means 'current loop index'
+- ``s``: means 'stream'
+
+.. code:: nim
+
+    8: a[5] # reads 5 8-bit integers
+    8: b{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
+    8: [c] # reads 8-bit integers until next field is matched
+    3: _ = 0b111 # magic value can be of any type
 
 Substreams
 ~~~~~~~~~~
 
-The call syntax described in the previous section in not limited to strings.
-In fact, it more generally forces the creation of a **substream**:
+Call syntax forces the creation of a substream:
 
 .. code:: nim
 
@@ -127,70 +167,37 @@ In fact, it more generally forces the creation of a **substream**:
 In the above example, ``size`` bytes (4 in this case) will be read from the main ``BitStream``.
 Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
 Since ``inner`` will only use 3 of them, the remaining 1 will effectively be discarded.
-Note that unlike in ``Type``, here size is in counted bytes.
+Note that unlike in ``Type``, here size is in counted bytes. It is implied that you cannot create
+a substream if your bitstream is unaligned.
 
-Alignment
-~~~~~~~~~
+Strings
+~~~~~~~
 
-Currently unaligned reads for strings are not supported:
+Strings are special because they don't have a fixed size. Therefore, you
+must provide enough information regarding their termination. This can be
+achieved with one of the following:
 
-.. code:: nim
-
-    createParser(myParser):
-      6: x
-      s: y # invalid, generates an exception
-
-If any of the following is violated, binaryparse should generate an exception:
-
-- Byte endianness can only be used with byte-multiple integers.
-- Bit endianness must be uniform between **byte boundaries**.
-- Spec must finish on a byte boundary.
+- Use of substream
+- Assertion
+- Magic
 
 .. code:: nim
 
-   createParser(myParser, bitEndian = n):
-     b9: a # error: cannot apply byte endianness
-     r6: b # error: shares bits with previous byte
-     10: c # error: spec does not finish on a byte boundary
+    s: a # invalid: next field doesn't use assertion
+    s: b(5) # string of length 5
+    s: c = "ABC" # reads a string of length 3 that must match "ABC"
+    s: d # reads a string until next field is matched
+    s: _ = "MAGIC"
+    s: e[5] # reads 5 null-terminated strings
+    s: [d] # reads null-terminated strings until next field matches
+    3: term = 0b111 # terminator of the above sequence
 
-Assertion
-~~~~~~~~~
+Clarifications:
 
-Use ``= expr`` for producing an exception if the parsed value doesn't
-match ``expr``.
-
-Example:
-
-.. code:: nim
-
-    s: x = "binaryparse is awesome"
-    8: y[5] = @[0, 1, 2, 3, 4]
-
-Repetition
-~~~~~~~~~~
-
-There are 3 ways to produce a ``seq`` of your ``Type``:
-
-- ``for``: append ``[expr]`` to the name for repeating ``expr``
-  times
-- ``until``: append ``{expr}`` to the name for repeating until
-  ``expr`` is evaluated to ``true``
-- ``magic``: append ``[]`` to the name and use assertion with
-  your **next** field
-
-In until repetition you can use 3 special symbols:
-
-- ``e``: means 'last element read'
-- ``i``: means 'current loop index'
-- ``s``: means 'stream'
-
-.. code:: nim
-
-    16: a[5] # seq[int16] of size 5
-    u8: b{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
-    s: str[] # reads chars into a string until next field is matched
-    3: _ = 0b111 # magic value is discarded
-    16: c{s.atEnd} # seq[int16] until end of stream
+- **When and only when using repetition** on strings they are implicitly
+  null-terminated
+- When using both a substream and an assertion in the next field, the
+  substream takes precedence and the next field is not magic
 
 Complex types
 ~~~~~~~~~~~~~
