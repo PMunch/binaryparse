@@ -157,18 +157,27 @@ Call syntax forces the creation of a substream:
 
 .. code:: nim
 
-    createParser(inner):
-      8: x
-      16: y
+    createParser(aux, size: int):
+      8: x[size]
     createParser(myParser):
-      8: size = 4
-      *inner: fixed(size)
+      8: use = 4
+      8: limit = 8
+      *inner(size): aux(limit)
 
-In the above example, ``size`` bytes (4 in this case) will be read from the main ``BitStream``.
+In the above example, ``limit`` bytes (8 in this case) will be read from the main ``BitStream``.
 Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
-Since ``inner`` will only use 3 of them, the remaining 1 will effectively be discarded.
-Note that unlike in ``Type``, here size is in counted bytes. It is implied that you cannot create
+Since ``inner`` will only use 4 of them, the remaining 4 will effectively be discarded.
+
+Note that unlike in ``Type``, here size is counted bytes. It is implied that you cannot create
 a substream if your bitstream is unaligned.
+
+This feature is **not implemented for repetition** because it would increase complexity with little benefits.
+The following syntax is **invalid** and you should use the technique with the auxiliary complex type shown above:
+
+.. code:: nim
+
+    createParser(myParser):
+      u8: a[4](6) # does substream refer to each individual element or the whole sequence?
 
 Strings
 ~~~~~~~

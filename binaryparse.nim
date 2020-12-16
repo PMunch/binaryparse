@@ -155,18 +155,27 @@
 ##
 ## .. code:: nim
 ##
-##     createParser(inner):
-##       8: x
-##       16: y
+##     createParser(aux, size: int):
+##       8: x[size]
 ##     createParser(myParser):
-##       8: size = 4
-##       *inner: fixed(size)
+##       8: use = 4
+##       8: limit = 8
+##       *inner(size): aux(limit)
 ##
-## In the above example, ``size`` bytes (4 in this case) will be read from the main ``BitStream``.
+## In the above example, ``limit`` bytes (8 in this case) will be read from the main ``BitStream``.
 ## Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
-## Since ``inner`` will only use 3 of them, the remaining 1 will effectively be discarded.
-## Note that unlike in ``Type``, here size is in counted bytes. It is implied that you cannot create
+## Since ``inner`` will only use 4 of them, the remaining 4 will effectively be discarded.
+##
+## Note that unlike in ``Type``, here size is counted bytes. It is implied that you cannot create
 ## a substream if your bitstream is unaligned.
+##
+## This feature is **not implemented for repetition** because it would increase complexity with little benefits.
+## The following syntax is **invalid** and you should use the technique with the auxiliary complex type shown above:
+##
+## .. code:: nim
+##
+##     createParser(myParser):
+##       u8: a[4](6) # does substream refer to each individual element or the whole sequence?
 ##
 ## Strings
 ## ~~~~~~~
@@ -489,15 +498,14 @@ proc decodeOperations(node: NimNode): Operations =
     result[child[0].strVal] = child[1]
 
 proc decodeValue(node: NimNode, st: var seq[string], params: seq[string]): Value =
-  # sizeExpr: NimNode
   var node = node
   result = Value()
   if node.kind == nnkAsgn:
     result.valueExpr = node[1]
-    prefixFields(result.valueExpr, st, params, ident"result")
     node = node[0]
   if node.kind == nnkCall:
-    discard
+    result.sizeExpr = node[1]
+    node = node[0]
   if node.kind == nnkIdent:
     result.repeat = rNo
     if node.strVal != "_":
@@ -726,16 +734,20 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
       impl = f.typ.getImpl
       field = f.val.name
       fieldIdent = ident(field)
-      value = f.val.valueExpr
       rTmp = genSym(nskVar)
       wTmp = genSym(nskVar)
+    var
+      rValue = f.val.valueExpr.copyNimTree
+      wValue = f.val.valueExpr.copyNimTree
+    rValue.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"result")
+    wValue.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"input")
     if f.val.repeat == rNo:
       block generateRead:
         reader.add(quote do:
           var `rTmp`: `impl`)
         reader.add createReadStatement(rTmp, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
       block generateWrite:
-        let sym = if field == "": (if value == nil: nil else: value)
+        let sym = if field == "": (if wValue == nil: nil else: wValue)
                   else: quote do: `input`.`fieldIdent`
         writer.add createWriteStatement(sym, bs, f.typ, fieldsSymbolTable, paramsSymbolTable)
       if field != "":
@@ -762,12 +774,12 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
         block generateWrite:
           writer.add(
             if field == "":
-              if value == nil:
+              if wValue == nil:
                 quote do:
                   var `wTmp` = newSeq[`impl`](`wExpr`)
               else:
                 quote do:
-                  var `wTmp` = `value`
+                  var `wTmp` = `wValue`
             else:
               quote do:
                 var `wTmp` = `input`.`fieldIdent`)
@@ -805,12 +817,12 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
           wExpr.replaceWith(ident"s", bs)
           writer.add(
             if field == "":
-              if value == nil:
+              if wValue == nil:
                 quote do:
                   var `wTmp` = newSeq[`impl`](`wExpr`)
               else:
                 quote do:
-                  var `wTmp` = `value`
+                  var `wTmp` = `wValue`
             else:
               quote do:
                 var `wTmp` = `input`.`fieldIdent`)
@@ -820,11 +832,11 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
       else: discard
       if field != "":
         tupleMeat.add(newIdentDefs(ident(field), quote do: seq[`impl`]))
-    if value != nil:
+    if rValue != nil:
       reader.add(quote do:
-        if `rTmp` != (`value`):
+        if `rTmp` != (`rValue`):
           raise newException(MagicError, "field '" & $`field` & "' was " &
-                            $`rTmp` & " instead of " & $`value`))
+                            $`rTmp` & " instead of " & $`rValue`))
     if field != "":
       reader.add(quote do: `res`.`fieldIdent` = `rTmp`)
     when defined(binaryparseLog):
