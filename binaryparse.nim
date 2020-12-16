@@ -123,6 +123,30 @@
 ## field if it's a **string** or a **sequence indicated as magic-terminated**.
 ## This is discussed in later sections.
 ##
+## Complex types
+## ~~~~~~~~~~~~~
+##
+## Instead of the described identifier for specifying ``Type``, you can
+## call a previously defined parser by using ``*`` followed by the name of
+## the parser. If your parser is parametric you must pass arguments to it
+## with standard call syntax.
+##
+## Example:
+##
+## .. code:: nim
+##
+##     createParser(inner):
+##       32: a
+##       32: b
+##
+##     createParser(innerWithArgs, size: int32):
+##       32: a
+##       32: b[size]
+##
+##     createParser(outer):
+##       *inner: x
+##       *innerWithArgs(x.a): y
+##
 ## Repetition
 ## ~~~~~~~~~~
 ##
@@ -145,8 +169,10 @@
 ##
 ##     8: a[5] # reads 5 8-bit integers
 ##     8: b{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
-##     8: {c} # reads 8-bit integers until next field is matched
+##     8: {c} # reads 8-bit integers until next field is matches
 ##     3: _ = 0b111 # magic value can be of any type
+##     u8: {d[5]} # reads byte sequences each of length 5 until next field matches
+##     s: _ = "END"
 ##
 ## Substreams
 ## ~~~~~~~~~~
@@ -196,8 +222,10 @@
 ##     s: d # reads a string until next field is matched
 ##     s: _ = "MAGIC"
 ##     s: e[5] # reads 5 null-terminated strings
-##     s: {d} # reads null-terminated strings until next field matches
+##     s: {f} # reads null-terminated strings until next field matches
 ##     3: term = 0b111 # terminator of the above sequence
+##     s: {g[5]} # sequence of 5-length sequences of null-terminated strings
+##     s: _ = "END_NESTED"
 ##
 ## Clarifications:
 ##
@@ -205,30 +233,6 @@
 ##   null-terminated
 ## - When using both a substream and an assertion in the next field, the
 ##   substream takes precedence and the next field is not magic
-##
-## Complex types
-## ~~~~~~~~~~~~~
-##
-## Instead of the described identifier for specifying ``Type``, you can
-## call a previously defined parser by using ``*`` followed by the name of
-## the parser. If your parser is parametric you must pass arguments to it
-## with standard call syntax.
-##
-## Example:
-##
-## .. code:: nim
-##
-##     createParser(inner):
-##       32: a
-##       32: b
-##
-##     createParser(innerWithArgs, size: int32):
-##       32: a
-##       32: b[size]
-##
-##     createParser(outer):
-##       *inner: x
-##       *innerWithArgs(x.a): y
 ##
 ## Custom parser API
 ## ~~~~~~~~~~~~~~~~~
@@ -344,6 +348,7 @@ type
     of rNo: discard
     valueExpr: NimNode
     sizeExpr: NimNode
+    isMagic: bool
   Field = tuple
     typ: Type
     opts: Operations
@@ -503,6 +508,11 @@ proc decodeValue(node: NimNode, st: var seq[string], params: seq[string]): Value
   if node.kind == nnkAsgn:
     result.valueExpr = node[1]
     node = node[0]
+  if node.kind == nnkBracket:
+    result.isMagic = true
+    if result.valueExpr != nil:
+      raise newException(Defect,
+        "Magic and assertion can't be used together in the same field")
   if node.kind == nnkCall:
     result.sizeExpr = node[1]
     node = node[0]
