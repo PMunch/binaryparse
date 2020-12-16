@@ -216,8 +216,9 @@
 ##
 ## .. code:: nim
 ##
-##     s: a # invalid: next field doesn't use assertion
-##     s: b(5) # string of length 5
+##     s: a # a null-terminated string
+##     s: _ # error: encoder unknows how many bytes to encode
+##     s: b(5) # string of length 5 (end of substream marks termination)
 ##     s: c = "ABC" # reads a string of length 3 that must match "ABC"
 ##     s: d # reads a string until next field is matched
 ##     s: _ = "MAGIC"
@@ -229,8 +230,8 @@
 ##
 ## Clarifications:
 ##
-## - **When and only when using repetition** on strings they are implicitly
-##   null-terminated
+## - Strings are always null-terminated except when using assertion or magic
+##   on it directly (then, null byte must be included in the value)
 ## - When using both a substream and an assertion in the next field, the
 ##   substream takes precedence and the next field is not magic
 ##
@@ -513,26 +514,22 @@ proc decodeValue(node: NimNode, st: var seq[string], params: seq[string]): Value
     if result.valueExpr != nil:
       raise newException(Defect,
         "Magic and assertion can't be used together in the same field")
-  if node.kind == nnkCall:
+  if node.kind == nnkBracketExpr:
+    result.repeat = rFor
+    result.repeatExpr = node[1]
+    node = node[0]
+  elif node.kind == nnkCurlyExpr:
+    result.repeat = rUntil
+    result.repeatExpr = node[1]
+    node = node[0]
+  elif node.kind == nnkCall:
     result.sizeExpr = node[1]
     node = node[0]
-  if node.kind == nnkIdent:
-    result.repeat = rNo
-    if node.strVal != "_":
-      result.name = node.strVal
-      st.add(result.name)
-  else:
-    if node[0].strVal != "_":
-      result.name = node[0].strVal
-      st.add(result.name)
-    case node.kind
-    of nnkBracketExpr:
-      result.repeat = rFor
-    of nnkCurlyExpr:
-      result.repeat = rUntil
-    else:
-      syntaxError()
-    result.repeatExpr = node[1]
+  if node.kind != nnkIdent:
+    syntaxError()
+  if node.strVal != "_":
+    result.name = node.strVal
+    st.add(result.name)
 
 proc decodeHeader(input: seq[NimNode]): tuple[params: seq[NimNode], opts: Options] =
   result.opts = defaultOptions
@@ -643,16 +640,10 @@ proc createReadStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): 
       else:
         `sym` = `floatCast`)
   of kStr:
-    discard
-    #[
     result.add((quote do:
       if not isAligned(`bs`):
         raise newException(IOError, "Stream must be aligned to read a string")),
-      if size == 0:
-        quote do: `sym` = readStr(`bs`)
-      else:
-        quote do: `sym` = readStr(`bs`, `sizeNode`))
-    ]#
+      quote do: `sym` = readStr(`bs`))
   of kCustom:
     let call = getCustomReader(typ, bs, st, params)
     result.add(quote do: `sym` = `call`)
@@ -688,29 +679,15 @@ proc createWriteStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]):
       else:
         result.add(quote do: `procUnaligned`(`bs`, `sizeNode`, `tmp`, `endianNode`))
   of kStr:
-    discard
-    #[
-    let lenNode = newLit(size.int div 8)
-    if size == 0 and sym == nil:
-      raise newException(Defect,
-        "Null-terminated strings must have a name or value")
     result.add(quote do:
       if not isAligned(`bs`):
         raise newException(IOError, "Stream must be aligned to write a string"))
-    let tmp = genSym(nskVar)
-    result.add(
-      if sym == nil:
-        quote do:
-          writeZeroBytes(`bs`, `lenNode`)
-      elif size == 0:
-        quote do:
-          var `tmp` = `sym`
-          writeTermStr(`bs`, `tmp`)
-      else:
-        quote do:
-          var `tmp` = `sym`
-          writeStr(`bs`, `tmp`))
-    ]#
+    if sym != nil:
+      let tmp = genSym(nskVar)
+      result.add(
+        var `tmp` = `sym`
+        writeStr(`bs`, `tmp`))
+
   of kCustom:
     let call = getCustomWriter(typ, bs, st, params)
     call.insert(2, sym)
