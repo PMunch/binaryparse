@@ -184,13 +184,13 @@
 ##     createParser(aux, size: int):
 ##       8: x[size]
 ##     createParser(myParser):
-##       8: use = 4
+##       8: x = 4
 ##       8: limit = 8
-##       *inner(size): aux(limit)
+##       *aux(x): fixed(limit)
 ##
 ## In the above example, ``limit`` bytes (8 in this case) will be read from the main ``BitStream``.
-## Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
-## Since ``inner`` will only use 4 of them, the remaining 4 will effectively be discarded.
+## Then, a substream will be created out of them, which will then be used as the stream for parsing ``fixed``.
+## Since ``fixed`` will only use 4 of them, the remaining 4 will effectively be discarded.
 ##
 ## Note that unlike in ``Type``, here size is counted bytes. It is implied that you cannot create
 ## a substream if your bitstream is unaligned.
@@ -656,18 +656,18 @@ proc createReadStatement(sym, bs: NimNode, f: Field, st, params: seq[string]): N
     let call = getCustomReader(f.typ, bs, st, params)
     result.add(quote do: `sym` = `call`)
 
-proc createWriteStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]): NimNode {.compileTime.} =
+proc createWriteStatement(f: Field, sym, bs: NimNode, st, params: seq[string]): NimNode {.compileTime.} =
   result = newStmtList()
   let
-    kind = typ.kind
-    impl = typ.getImpl
-    endian = if typ.endian == littleEndian: 'l' else: 'b'
-    endianNode = newLit(typ.endian)
-    bitEndian = if typ.bitEndian == littleEndian: 'l' else: 'b'
+    kind = f.typ.kind
+    impl = f.typ.getImpl
+    endian = if f.typ.endian == littleEndian: 'l' else: 'b'
+    endianNode = newLit(f.typ.endian)
+    bitEndian = if f.typ.bitEndian == littleEndian: 'l' else: 'b'
   case kind
   of kInt, kUInt, kFloat:
     let
-      size = typ.size
+      size = f.typ.size
       sizeNode = newLit(size.int)
       procUnaligned = ident("writebits" & bitEndian & "e")
     if sym == nil:
@@ -695,8 +695,11 @@ proc createWriteStatement(sym, bs: NimNode, typ: Type, st, params: seq[string]):
       result.add(quote do:
         var `tmp` = `sym`
         writeStr(`bs`, `tmp`))
+    if f.val.valueExpr == nil and not f.val.isMagic:
+      result.add(quote do:
+        writeBe(`bs`, 0'u8))
   of kCustom:
-    let call = getCustomWriter(typ, bs, st, params)
+    let call = getCustomWriter(f.typ, bs, st, params)
     call.insert(2, sym)
     result.add(quote do: `call`)
 
@@ -769,7 +772,7 @@ proc createWriteField(f: Field, bs: NimNode, st: var seq[string], params: seq[st
   if f.val.repeat == rNo:
     let sym = if field == "": (if value == nil: nil else: value)
               else: quote do: `input`.`fieldIdent`
-    result.add createWriteStatement(sym, bs, f.typ, st, params)
+    result.add createWriteStatement(f, sym, bs, st, params)
   else:
     var expr = f.val.repeatExpr.copyNimTree
     expr.prefixFields(st, params, input)
@@ -788,7 +791,7 @@ proc createWriteField(f: Field, bs: NimNode, st: var seq[string], params: seq[st
             var `tmp` = `input`.`fieldIdent`)
       let
         loopElem = genSym(nskForVar)
-        writeStmt = createWriteStatement(loopElem, bs, f.typ, st, params)
+        writeStmt = createWriteStatement(f, loopElem, bs, st, params)
       result.add(quote do:
         for `loopElem` in `tmp`:
           `writeStmt`)
@@ -810,7 +813,7 @@ proc createWriteField(f: Field, bs: NimNode, st: var seq[string], params: seq[st
         else:
           quote do:
             var `tmp` = `input`.`fieldIdent`)
-      let writeStmt = createWriteStatement(sym, bs, f.typ, st, params)
+      let writeStmt = createWriteStatement(f, sym, bs, st, params)
       result.add(quote do:
         for `loopIdx`, `sym` in `tmp`: `writeStmt`)
     else: discard
@@ -844,23 +847,27 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
         fieldTypeImpl = quote do: seq[`fieldTypeImpl`]
       tupleMeat.add(newIdentDefs(ident(field), fieldTypeImpl))
     if f.val.sizeExpr != nil:
-      let size = f.val.sizeExpr
+      var
+        rSize = f.val.sizeExpr
+        wSize = f.val.sizeExpr
       block generateRead:
+        rSize.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"result")
         let
           ss = genSym(nskVar)
           rf = createReadField(f, ss, fieldsSymbolTable, paramsSymbolTable)
         reader.add(quote do:
-          var `ss` = createSubstream(`bs`, `size`)
+          var `ss` = createSubstream(`bs`, `rSize`)
           `rf`)
       block generateWrite:
+        wSize.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"input")
         let
           ss = genSym(nskVar)
           wf = createWriteField(f, ss, fieldsSymbolTable, paramsSymbolTable)
         writer.add(quote do:
-          var `ss` = newPaddedBitStream(`size`)
+          var `ss` = newPaddedBitStream(`wSize`)
           `wf`
           `ss`.seek(0)
-          `bs`.writeFromSubstream(`ss`))
+          `bs`.writeFromSubstream(`ss`, `wSize`))
     else:
       block generateRead:
         reader.add createReadField(f, bs, fieldsSymbolTable, paramsSymbolTable)

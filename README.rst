@@ -186,13 +186,13 @@ Call syntax forces the creation of a substream:
     createParser(aux, size: int):
       8: x[size]
     createParser(myParser):
-      8: use = 4
+      8: x = 4
       8: limit = 8
-      *inner(size): aux(limit)
+      *aux(x): fixed(limit)
 
 In the above example, ``limit`` bytes (8 in this case) will be read from the main ``BitStream``.
-Then, a substream will be created out of them, which will then be used as the stream for parsing ``inner``.
-Since ``inner`` will only use 4 of them, the remaining 4 will effectively be discarded.
+Then, a substream will be created out of them, which will then be used as the stream for parsing ``fixed``.
+Since ``fixed`` will only use 4 of them, the remaining 4 will effectively be discarded.
 
 Note that unlike in ``Type``, here size is counted bytes. It is implied that you cannot create
 a substream if your bitstream is unaligned.

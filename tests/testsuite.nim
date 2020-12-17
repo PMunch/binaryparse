@@ -1,5 +1,5 @@
 import ../binaryparse, bitstreams, unittest
-#[
+
 suite "Aligned":
   createParser(p):
     16: beword
@@ -100,12 +100,12 @@ suite "Complex":
       echo getCurrentExceptionMsg()
       fail()
     check data == outer.get(sbs)
-]#
+
 suite "Assertions":
   createParser(inner):
     8: bytes[4]
   createParser(outer):
-    s24: str = "ABC"
+    s: str = "ABC"
     8: x = 1
     8: y = 2
     8: z = x + y
@@ -127,7 +127,7 @@ suite "Assertions":
       echo getCurrentExceptionMsg()
       fail()
     check data == outer.get(sbs)
-#[
+
 suite "Repetition":
   createParser(p):
     8: size
@@ -159,13 +159,75 @@ suite "Repetition":
       fail()
     check data == p.get(sbs)
 
+suite "Substreams":
+  createParser(aux):
+    8: x
+  createParser(p):
+    *aux: x(3)
+    8: y
+  var fbs = newFileBitStream("tests/substreams.hex")
+  defer: close(fbs)
+  var data: typeGetter(p)
+  try: data = p.get(fbs)
+  except:
+    echo getCurrentExceptionMsg()
+    fail()
+  test "test":
+    check data.x.x == 0x12
+    check data.y == 0x78
+  test "serialization":
+    var sbs = newStringBitStream()
+    defer: close(sbs)
+    try:
+      p.put(sbs, data)
+      sbs.seek(0)
+    except:
+      echo getCurrentExceptionMsg()
+      fail()
+    check data == p.get(sbs)
+
+suite "Strings":
+  createParser(p):
+    s: a
+    s: b(5)
+    s: c = "MA"
+#    s: d
+#    s: _ = "GI"
+#    s: e[5]
+#    s: {f}
+#    3: term = 0b111
+#    s: {g[5]}
+#    s: _ = "CK"
+  var fbs = newFileBitStream("tests/strings.hex")
+  defer: close(fbs)
+  var data: typeGetter(p)
+  try: data = p.get(fbs)
+  except:
+    echo getCurrentExceptionMsg()
+    fail()
+  test "null-terminated":
+    data.a = "ABC"
+    data.b = "DEFGH"
+  test "magic":
+    skip()
+  test "serialization":
+    var sbs = newStringBitStream()
+    defer: close(sbs)
+    try:
+      p.put(sbs, data)
+      sbs.seek(0)
+    except:
+      echo getCurrentExceptionMsg()
+      fail()
+    check data == p.get(sbs)
+
 suite "Unnamed fields":
   createParser(p):
     16: _ = 0x1234
     l32: _
     f32: _
     lf64: _
-    s24: _
+    s: _(3)
     s: _ = "DEF"
   var fbs = newFileBitStream("tests/aligned.hex")
   defer: close(fbs)
@@ -218,4 +280,3 @@ suite "Parser options":
       echo getCurrentExceptionMsg()
       fail()
     check data == p.get(sbs)
-]#
