@@ -172,9 +172,13 @@ In until repetition you can use 3 special symbols:
     8: a[5] # reads 5 8-bit integers
     8: b{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
     8: {c} # reads 8-bit integers until next field is matches
-    3: _ = 0b111 # magic value can be of any type
+    16: _ = 0xABCD
     u8: {d[5]} # reads byte sequences each of length 5 until next field matches
     s: _ = "END"
+
+Due to current limitations of the underlying bitstream implementation, to perform magic,
+your stream must be aligned and all the reads involved must also be aligned. This will
+be fixed in the future.
 
 Substreams
 ~~~~~~~~~~
@@ -218,23 +222,21 @@ achieved with one of the following:
 
 .. code:: nim
 
-    s: a # error: next field doesn't use assertion
+    s: a # null/eos-terminated (because next field doesn't use assertion)
     s: b(5) # reads a string from a substream of 5 bytes until null/eos
     s: c = "ABC" # reads a string of length 3 that must match "ABC"
     s: d # reads a string until next field is matched
     s: _ = "MAGIC"
     s: e[5] # reads 5 null-terminated strings
     s: {f} # reads null-terminated strings until next field matches
-    3: term = 0b111 # terminator of the above sequence
+    8: term = 0xff # terminator of the above sequence
     s: {g[5]} # sequence of 5-length sequences of null-terminated strings
     s: _ = "END_NESTED"
 
-Clarifications:
+Rules:
 
-- Strings are magic by default; using a substream or assertion overrides
-  this behavior
-- When using magic or assertion, strings are **not** null-terminated
-  (if you want them to be you must explicitly include a null byte in the value)
+- Strings are null/eos-terminated unless assertion is used on the same field
+  **or** the next one
 - When using repetition, each string element is null-terminated
 
 Custom parser API

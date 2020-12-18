@@ -189,15 +189,15 @@ suite "Substreams":
 suite "Strings":
   createParser(p):
     s: a
-    s: b(5)
-    s: c = "MA"
-#    s: d
-#    s: _ = "GI"
-#    s: e[5]
-#    s: {f}
-#    3: term = 0b111
-#    s: {g[5]}
-#    s: _ = "CK"
+    s: b(2)
+    s: c = "E"
+    s: d
+    s: _ = "H"
+    s: e[2]
+    s: {f}
+    u8: term = 0xFF
+    s: {g[2]}
+    s: _ = "END"
   var fbs = newFileBitStream("tests/strings.hex")
   defer: close(fbs)
   var data: typeGetter(p)
@@ -205,12 +205,17 @@ suite "Strings":
   except:
     echo getCurrentExceptionMsg()
     fail()
+  test "null-terminated":
+    check data.a == "AB"
+    check data.e == @["IJ", "KL"]
+  test "substream":
+    data.b = "CD"
   test "magic":
-    data.a = "ABC"
-    data.b = "DEFGH"
+    check data.d == "FG"
+    check data.f == @["M", "NO", "PQR"]
+    check data.g == @[@["01", "234"], @["5", "678"]]
   test "serialization":
-    #var sbs = newStringBitStream()
-    var sbs = newFileBitStream("hex.out", fmReadWrite)
+    var sbs = newStringBitStream()
     defer: close(sbs)
     try:
       p.put(sbs, data)
@@ -219,7 +224,7 @@ suite "Strings":
       echo getCurrentExceptionMsg()
       fail()
     check data == p.get(sbs)
-
+#[
 suite "Unnamed fields":
   createParser(p):
     16: _ = 0x1234

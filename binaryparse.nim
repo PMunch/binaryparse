@@ -170,9 +170,13 @@
 ##     8: a[5] # reads 5 8-bit integers
 ##     8: b{e == 103 or i > 9} # reads until it finds the value 103 or completes 10th iteration
 ##     8: {c} # reads 8-bit integers until next field is matches
-##     3: _ = 0b111 # magic value can be of any type
+##     16: _ = 0xABCD
 ##     u8: {d[5]} # reads byte sequences each of length 5 until next field matches
 ##     s: _ = "END"
+##
+## Due to current limitations of the underlying bitstream implementation, to perform magic,
+## your stream must be aligned and all the reads involved must also be aligned. This will
+## be fixed in the future.
 ##
 ## Substreams
 ## ~~~~~~~~~~
@@ -223,7 +227,7 @@
 ##     s: _ = "MAGIC"
 ##     s: e[5] # reads 5 null-terminated strings
 ##     s: {f} # reads null-terminated strings until next field matches
-##     3: term = 0b111 # terminator of the above sequence
+##     8: term = 0xff # terminator of the above sequence
 ##     s: {g[5]} # sequence of 5-length sequences of null-terminated strings
 ##     s: _ = "END_NESTED"
 ##
@@ -694,7 +698,7 @@ proc createWriteStatement(f: Field, sym, bs: NimNode, st, params: seq[string]): 
       result.add(quote do:
         var `tmp` = `sym`
         writeStr(`bs`, `tmp`))
-    if f.val.valueExpr == nil and not f.val.isMagic:
+    if f.val.valueExpr == nil and (f.magic == nil or f.val.isMagic):
       result.add(quote do:
         writeBe(`bs`, 0'u8))
   of kCustom:
@@ -753,56 +757,65 @@ proc createWriteField(f: Field, bs: NimNode, st: var seq[string], params: seq[st
     input = ident"input"
     tmp = genSym(nskVar)
     impl = f.typ.getImpl
+    elem = if f.val.isMagic: genSym(nskForVar)
+           else: quote do: `input`.`fieldIdent`
   var value = f.val.valueExpr
   value.prefixFields(st, params, input)
-  if f.val.repeat == rNo:
+  var writeStmts = newStmtList()
+  case f.val.repeat
+  of rNo:
     let sym = if field == "": (if value == nil: nil else: value)
-              else: quote do: `input`.`fieldIdent`
-    result.add createWriteStatement(f, sym, bs, st, params)
-  else:
+              else: quote do: `elem`
+    writeStmts.add createWriteStatement(f, sym, bs, st, params)
+  of rFor:
     var expr = f.val.repeatExpr.copyNimTree
     expr.prefixFields(st, params, input)
-    case f.val.repeat
-    of rFor:
-      result.add(
-        if field == "":
-          if value == nil:
-            quote do:
-              var `tmp` = newSeq[`impl`](`expr`)
-          else:
-            quote do:
-              var `tmp` = `value`
+    writeStmts.add(
+      if field == "":
+        if value == nil:
+          quote do:
+            var `tmp` = newSeq[`impl`](`expr`)
         else:
           quote do:
-            var `tmp` = `input`.`fieldIdent`)
-      let
-        loopElem = genSym(nskForVar)
-        writeStmt = createWriteStatement(f, loopElem, bs, st, params)
-      result.add(quote do:
-        for `loopElem` in `tmp`:
-          `writeStmt`)
-    of rUntil:
-      let
-        sym = genSym(nskForVar)
-        loopIdx = genSym(nskForVar)
-      expr.replaceWith(ident"e", sym)
-      expr.replaceWith(ident"i", loopIdx)
-      expr.replaceWith(ident"s", bs)
-      result.add(
-        if field == "":
-          if value == nil:
-            quote do:
-              var `tmp` = newSeq[`impl`](`expr`)
-          else:
-            quote do:
-              var `tmp` = `value`
+            var `tmp` = `value`
+      else:
+        quote do:
+          var `tmp` = `elem`)
+    let
+      loopElem = genSym(nskForVar)
+      writeStmt = createWriteStatement(f, loopElem, bs, st, params)
+    writeStmts.add(quote do:
+      for `loopElem` in `tmp`:
+        `writeStmt`)
+  of rUntil:
+    var expr = f.val.repeatExpr.copyNimTree
+    expr.prefixFields(st, params, input)
+    let
+      sym = genSym(nskForVar)
+      loopIdx = genSym(nskForVar)
+    expr.replaceWith(ident"e", sym)
+    expr.replaceWith(ident"i", loopIdx)
+    expr.replaceWith(ident"s", bs)
+    writeStmts.add(
+      if field == "":
+        if value == nil:
+          quote do:
+            var `tmp` = newSeq[`impl`](`expr`)
         else:
           quote do:
-            var `tmp` = `input`.`fieldIdent`)
-      let writeStmt = createWriteStatement(f, sym, bs, st, params)
-      result.add(quote do:
-        for `loopIdx`, `sym` in `tmp`: `writeStmt`)
-    else: discard
+            var `tmp` = `value`
+      else:
+        quote do:
+          var `tmp` = `elem`)
+    let writeStmt = createWriteStatement(f, sym, bs, st, params)
+    writeStmts.add(quote do:
+      for `loopIdx`, `sym` in `tmp`: `writeStmt`)
+  if f.val.isMagic:
+    result.add(quote do:
+      for `elem` in `input`.`fieldIdent`:
+        `writeStmts`)
+  else:
+    result.add(writeStmts)
 
 macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
   ## The main macro in this module. It takes the ``name`` of the tuple to
@@ -824,25 +837,30 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
     paramsSymbolTable = collect(newSeq):
       for p in params:
         p[0].strVal
-    fields = collect(newSeq):
-      for def in rest[^1]:
-        decodeField(def, fieldsSymbolTable, paramsSymbolTable, parserOptions)
-  for i, f in fields:
+  var fields = collect(newSeq):
+    for def in rest[^1]:
+      decodeField(def, fieldsSymbolTable, paramsSymbolTable, parserOptions)
+  for i in 0 ..< fields.len - 1:
+    if fields[i].val.isMagic or
+       (fields[i].typ.kind == kStr and fields[i+1].val.valueExpr != nil):
+      if fields[i+1].val.valueExpr == nil:
+        raise newException(Defect,
+          "Magic was used without assertion at the next field")
+      fields[i].magic = fields[i+1]
+  for f in fields:
     let
       field = f.val.name
       fieldIdent = ident(field)
-      isSingleStr = f.typ.kind == kStr and f.val.repeat == rNo
-      noAssertion = f.val.valueExpr == nil
-    if isSingleStr and noAssertion and i < fields.len - 1 and
-       fields[i+1].val.valueExpr != nil:
-      f.val.isMagic = true
+      isSingleStr = f.typ.kind == kStr and f.val.repeat == rNo and not f.val.isMagic
     var impl = f.typ.getImpl
     if f.val.repeat != rNo:
       impl = quote do: seq[`impl`]
-    var value = f.val.valueExpr.copyNimTree
-    value.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
+    if f.val.isMagic:
+      impl = quote do: seq[`impl`]
     if field != "":
       tupleMeat.add(newIdentDefs(ident(field), impl))
+    var value = f.val.valueExpr.copyNimTree
+    value.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
     block generateRead:
       if f.val.sizeExpr != nil:
         var size = f.val.sizeExpr.copyNimTree
@@ -864,17 +882,17 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
         if field != "":
           reader.add(quote do:
             result.`fieldIdent` = `sym`)
-      elif isSingleStr and f.val.isMagic:
+      elif isSingleStr and f.magic != nil:
         let
           str = genSym(nskVar)
           tmp = genSym(nskVar)
           pos = genSym(nskLet)
-          rf = createReadField(tmp, fields[i+1], bs, fieldsSymbolTable, paramsSymbolTable)
+          rf = createReadField(tmp, f.magic, bs, fieldsSymbolTable, paramsSymbolTable)
         var
-          tmpImpl = fields[i+1].typ.getImpl
-          magicVal = fields[i+1].val.valueExpr
+          tmpImpl = f.magic.typ.getImpl
+          magicVal = f.magic.val.valueExpr
         magicVal.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
-        if fields[i+1].val.repeat != rNo:
+        if f.magic.val.repeat != rNo:
           tmpImpl = quote do: seq[`tmpImpl`]
         reader.add(quote do:
           var
@@ -891,7 +909,37 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
           reader.add(quote do:
             result.`fieldIdent` = `str`)
       elif f.val.isMagic:
-        discard #TODO
+        let
+          arr = genSym(nskVar)
+          elem = genSym(nskVar)
+          magic = genSym(nskVar)
+          pos = genSym(nskLet)
+          readElem = createReadField(elem, f, bs, fieldsSymbolTable, paramsSymbolTable)
+          readMagic = createReadField(magic, f.magic, bs, fieldsSymbolTable, paramsSymbolTable)
+        var elemImpl = f.typ.getImpl
+        if f.val.repeat != rNo:
+          elemImpl = quote do: seq[`elemImpl`]
+        var magicImpl = f.magic.typ.getImpl
+        if f.magic.val.repeat != rNo:
+          magicImpl = quote do: seq[`magicImpl`]
+        var magicVal = f.magic.val.valueExpr
+        magicVal.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
+        reader.add(quote do:
+          var
+            `arr`: seq[`elemImpl`]
+            `elem`: `elemImpl`
+            `magic`: `magicImpl`
+          while true:
+            let `pos` = getPosition(`bs`)
+            `readMagic`
+            `bs`.seek(`pos`)
+            if `magic` == `magicVal`:
+              break
+            `readElem`
+            `arr`.add(`elem`))
+        if field != "":
+          reader.add(quote do:
+            result.`fieldIdent` = `arr`)
       else:
         let
           sym = genSym(nskVar)
