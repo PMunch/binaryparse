@@ -708,7 +708,6 @@ proc createReadField(sym: NimNode, f: Field, bs: NimNode, st: var seq[string], p
   result = newStmtList()
   let
     res = ident"result"
-    field = f.val.name
     impl = f.typ.getImpl
   var value = f.val.valueExpr
   value.prefixFields(st, params, res)
@@ -819,8 +818,10 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
     fieldsSymbolTable = newSeq[string]()
     reader = newStmtList()
     writer = newStmtList()
-    bs = ident"s"
   let
+    bs = ident"s"
+    res = ident"result"
+    input = ident"input"
     (params, parserOptions) = decodeHeader(rest[0 .. ^2])
     paramsSymbolTable = collect(newSeq):
       for p in params:
@@ -834,27 +835,28 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
       fieldIdent = ident(field)
       isSingleStr = f.typ.kind == kStr and f.val.repeat == rNo
       noAssertion = f.val.valueExpr == nil
-    var
-      impl = f.typ.getImpl
-      value = f.val.valueExpr.copyNimTree
-    if f.val.repeat != rNo: impl = quote do: seq[`impl`]
-    value.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"result")
+    var impl = f.typ.getImpl
+    if f.val.repeat != rNo:
+      impl = quote do: seq[`impl`]
+    var value = f.val.valueExpr.copyNimTree
+    value.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
+    if ((isSingleStr and noAssertion) or f.val.isMagic) and
+       fields[i+1].val.valueExpr == nil:
+      raise newException(Defect,
+        &"Field {field} is magic but next field doesn't use assertion")
     if field != "":
       tupleMeat.add(newIdentDefs(ident(field), impl))
-    if f.val.sizeExpr != nil:
-      var
-        rSize = f.val.sizeExpr
-        wSize = f.val.sizeExpr
-      let field = f.val.name
-      block generateRead:
-        rSize.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"result")
+    block generateRead:
+      if f.val.sizeExpr != nil:
+        var size = f.val.sizeExpr.copyNimTree
+        size.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
         let
           sym = genSym(nskVar)
           ss = genSym(nskVar)
           rf = createReadField(sym, f, ss, fieldsSymbolTable, paramsSymbolTable)
         reader.add(quote do:
           var
-            `ss` = createSubstream(`bs`, `rSize`)
+            `ss` = createSubstream(`bs`, `size`)
             `sym`: `impl`
           `rf`)
         if value != nil:
@@ -865,54 +867,35 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
         if field != "":
           reader.add(quote do:
             result.`fieldIdent` = `sym`)
-      block generateWrite:
-        wSize.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"input")
+      elif isSingleStr and noAssertion:
         let
-          ss = genSym(nskVar)
-          wf = createWriteField(f, ss, fieldsSymbolTable, paramsSymbolTable)
-        writer.add(quote do:
-          var `ss` = newPaddedBitStream(`wSize`)
-          `wf`
-          `ss`.seek(0)
-          `bs`.writeFromSubstream(`ss`, `wSize`))
-    elif (isSingleStr and noAssertion) or f.val.isMagic:
-      if fields[i+1].val.valueExpr == nil:
-        raise newException(Defect,
-          &"Field {field} is magic but next field doesn't use assertion")
-      if isSingleStr and noAssertion:
-        block generateRead:
-          let
-            str = genSym(nskVar)
-            tmp = genSym(nskVar)
-            pos = genSym(nskLet)
-            rf = createReadField(tmp, fields[i+1], bs, fieldsSymbolTable, paramsSymbolTable)
+          str = genSym(nskVar)
+          tmp = genSym(nskVar)
+          pos = genSym(nskLet)
+          rf = createReadField(tmp, fields[i+1], bs, fieldsSymbolTable, paramsSymbolTable)
+        var
+          tmpImpl = fields[i+1].typ.getImpl
+          magic = fields[i+1].val.valueExpr
+        magic.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
+        if fields[i+1].val.repeat != rNo:
+          tmpImpl = quote do: seq[`tmpImpl`]
+        reader.add(quote do:
           var
-            tmpImpl = fields[i+1].typ.getImpl
-            magic = fields[i+1].val.valueExpr
-          magic.prefixFields(fieldsSymbolTable, paramsSymbolTable, ident"result")
-          if fields[i+1].val.repeat != rNo:
-            tmpImpl = quote do: seq[`tmpImpl`]
+            `str`: string
+            `tmp`: `tmpImpl`
+          while true:
+            let `pos` = getPosition(`bs`)
+            `rf`
+            `bs`.seek(`pos`)
+            if `tmp` == `magic`:
+              break
+            `str`.add(readU8(`bs`).char))
+        if field != "":
           reader.add(quote do:
-            var
-              `str`: string
-              `tmp`: `tmpImpl`
-            while true:
-              let `pos` = getPosition(`bs`)
-              `rf`
-              `bs`.seek(`pos`)
-              if `tmp` == `magic`:
-                break
-              `str`.add(readU8(`bs`).char))
-          if field != "":
-            reader.add(quote do:
-              result.`fieldIdent` = `str`)
-        block generateWrite:
-          #discard
-          writer.add createWriteField(f, bs, fieldsSymbolTable, paramsSymbolTable)
+            result.`fieldIdent` = `str`)
+      elif f.val.isMagic:
+        discard #TODO
       else:
-        discard
-    else:
-      block generateRead:
         let
           sym = genSym(nskVar)
           rf = createReadField(sym, f, bs, fieldsSymbolTable, paramsSymbolTable)
@@ -927,10 +910,21 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
         if field != "":
           reader.add(quote do:
             result.`fieldIdent` = `sym`)
-      block generateWrite:
+    block generateWrite:
+      if f.val.sizeExpr != nil:
+        var size = f.val.sizeExpr.copyNimTree
+        size.prefixFields(fieldsSymbolTable, paramsSymbolTable, input)
+        let
+          ss = genSym(nskVar)
+          wf = createWriteField(f, ss, fieldsSymbolTable, paramsSymbolTable)
+        writer.add(quote do:
+          var `ss` = newPaddedBitStream(`size`)
+          `wf`
+          `ss`.seek(0)
+          `bs`.writeFromSubstream(`ss`, `size`))
+      else:
         writer.add createWriteField(f, bs, fieldsSymbolTable, paramsSymbolTable)
   let
-    input = ident"input"
     readerName = genSym(nskProc)
     writerName = genSym(nskProc)
   if tupleMeat.len == 0:
