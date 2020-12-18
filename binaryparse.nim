@@ -216,7 +216,7 @@
 ##
 ## .. code:: nim
 ##
-##     s: a # error: next field doesn't use assertion
+##     s: a # null/eos-terminated (because next field doesn't use assertion)
 ##     s: b(5) # reads a string from a substream of 5 bytes until null/eos
 ##     s: c = "ABC" # reads a string of length 3 that must match "ABC"
 ##     s: d # reads a string until next field is matched
@@ -227,12 +227,10 @@
 ##     s: {g[5]} # sequence of 5-length sequences of null-terminated strings
 ##     s: _ = "END_NESTED"
 ##
-## Clarifications:
+## Rules:
 ##
-## - Strings are magic by default; using a substream or assertion overrides
-##   this behavior
-## - When using magic or assertion, strings are **not** null-terminated
-##   (if you want them to be you must explicitly include a null byte in the value)
+## - Strings are null/eos-terminated unless assertion is used on the same field
+##   **or** the next one
 ## - When using repetition, each string element is null-terminated
 ##
 ## Custom parser API
@@ -366,7 +364,7 @@ macro typeGetter*(body: typed): untyped =
 
 proc syntaxError() = raise newException(Defect, "Invalid syntax")
 
-proc getImpl(typ: Type): NimNode = # TODO
+proc getImpl(typ: Type): NimNode =
   case typ.kind
   of kInt, kUInt:
     var s = ""
@@ -696,7 +694,7 @@ proc createWriteStatement(f: Field, sym, bs: NimNode, st, params: seq[string]): 
       result.add(quote do:
         var `tmp` = `sym`
         writeStr(`bs`, `tmp`))
-    if f.val.repeat != rNo and f.val.valueExpr == nil:
+    if f.val.valueExpr == nil and not f.val.isMagic:
       result.add(quote do:
         writeBe(`bs`, 0'u8))
   of kCustom:
@@ -835,15 +833,14 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
       fieldIdent = ident(field)
       isSingleStr = f.typ.kind == kStr and f.val.repeat == rNo
       noAssertion = f.val.valueExpr == nil
+    if isSingleStr and noAssertion and i < fields.len - 1 and
+       fields[i+1].val.valueExpr != nil:
+      f.val.isMagic = true
     var impl = f.typ.getImpl
     if f.val.repeat != rNo:
       impl = quote do: seq[`impl`]
     var value = f.val.valueExpr.copyNimTree
     value.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
-    if ((isSingleStr and noAssertion) or f.val.isMagic) and
-       fields[i+1].val.valueExpr == nil:
-      raise newException(Defect,
-        &"Field {field} is magic but next field doesn't use assertion")
     if field != "":
       tupleMeat.add(newIdentDefs(ident(field), impl))
     block generateRead:
@@ -867,7 +864,7 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
         if field != "":
           reader.add(quote do:
             result.`fieldIdent` = `sym`)
-      elif isSingleStr and noAssertion:
+      elif isSingleStr and f.val.isMagic:
         let
           str = genSym(nskVar)
           tmp = genSym(nskVar)
@@ -875,8 +872,8 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
           rf = createReadField(tmp, fields[i+1], bs, fieldsSymbolTable, paramsSymbolTable)
         var
           tmpImpl = fields[i+1].typ.getImpl
-          magic = fields[i+1].val.valueExpr
-        magic.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
+          magicVal = fields[i+1].val.valueExpr
+        magicVal.prefixFields(fieldsSymbolTable, paramsSymbolTable, res)
         if fields[i+1].val.repeat != rNo:
           tmpImpl = quote do: seq[`tmpImpl`]
         reader.add(quote do:
@@ -887,7 +884,7 @@ macro createParser*(name: untyped, rest: varargs[untyped]): untyped =
             let `pos` = getPosition(`bs`)
             `rf`
             `bs`.seek(`pos`)
-            if `tmp` == `magic`:
+            if `tmp` == `magicVal`:
               break
             `str`.add(readU8(`bs`).char))
         if field != "":

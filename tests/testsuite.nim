@@ -189,7 +189,6 @@ suite "Substreams":
 suite "Strings":
   createParser(p):
     s: a
-    s: _ = "\0"
     s: b(5)
     s: c = "MA"
 #    s: d
@@ -210,7 +209,8 @@ suite "Strings":
     data.a = "ABC"
     data.b = "DEFGH"
   test "serialization":
-    var sbs = newStringBitStream()
+    #var sbs = newStringBitStream()
+    var sbs = newFileBitStream("hex.out", fmReadWrite)
     defer: close(sbs)
     try:
       p.put(sbs, data)
