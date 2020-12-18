@@ -218,9 +218,8 @@ achieved with one of the following:
 
 .. code:: nim
 
-    s: a # a null-terminated string
-    s: _ # error: encoder unknows how many bytes to encode
-    s: b(5) # string of length 5 (either null byte or end of substream terminates it)
+    s: a # error: next field doesn't use assertion
+    s: b(5) # reads a string from a substream of 5 bytes until null/eos
     s: c = "ABC" # reads a string of length 3 that must match "ABC"
     s: d # reads a string until next field is matched
     s: _ = "MAGIC"
@@ -232,10 +231,11 @@ achieved with one of the following:
 
 Clarifications:
 
-- Strings are always null-terminated except when using assertion or magic
-  on it directly (then, null byte must be included in the value)
-- When using both a substream and an assertion in the next field, the
-  substream takes precedence and the next field is not magic
+- Strings are magic by default; using a substream or assertion overrides
+  this behavior
+- When using magic or assertion, strings are **not** null-terminated
+  (if you want them to be you must explicitly include a null byte in the value)
+- When using repetition, each string element is null-terminated
 
 Custom parser API
 ~~~~~~~~~~~~~~~~~

@@ -7,7 +7,7 @@ suite "Aligned":
     f32: befloat
     lf64: ledouble
     s: str(3)
-    s: term
+    s: term = "DEF"
   var fbs = newFileBitStream("tests/aligned.hex")
   defer: close(fbs)
   var data: typeGetter(p)
@@ -189,6 +189,7 @@ suite "Substreams":
 suite "Strings":
   createParser(p):
     s: a
+    s: _ = "\0"
     s: b(5)
     s: c = "MA"
 #    s: d
@@ -205,11 +206,9 @@ suite "Strings":
   except:
     echo getCurrentExceptionMsg()
     fail()
-  test "null-terminated":
+  test "magic":
     data.a = "ABC"
     data.b = "DEFGH"
-  test "magic":
-    skip()
   test "serialization":
     var sbs = newStringBitStream()
     defer: close(sbs)
