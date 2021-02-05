@@ -139,16 +139,20 @@ template readDataLE*(stream: Stream, buffer: pointer, size: int) =
         "Unable to read the requested amount of bytes from file")
 
 template peekDataBE*(stream: Stream, buffer: pointer, size: int) =
+  let startPos = stream.getPosition()
+  defer: stream.setPosition(startPos)
   for i in 0..<size:
     let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
-    if stream.peekData(tmp, 1) != 1:
+    if stream.readData(tmp, 1) != 1:
       raise newException(IOError,
         "Unable to peek the requested amount of bytes from file")
 
 template peekDataLE*(stream: Stream, buffer: pointer, size: int) =
+  let startPos = stream.getPosition()
+  defer: stream.setPosition(startPos)
   for i in 0..<size:
     let tmp = cast[pointer](cast[int](buffer) + i)
-    if stream.peekData(tmp, 1) != 1:
+    if stream.readData(tmp, 1) != 1:
       raise newException(IOError,
         "Unable to peek the requested amount of bytes from file")
 
@@ -386,9 +390,15 @@ proc createWriteStatement(
       mask = bitInfo.mask
     result = newStmtList()
     if info.size mod 8 == 0:
-      result.add(quote do:
-        `stream`.writeDataBE(`field`.addr, `write`)
-      )
+      case info.endian
+      of littleEndian:
+        result.add(quote do:
+          `stream`.writeDataLE(`field`.addr, `write`)
+        )
+      of bigEndian:
+        result.add(quote do:
+          `stream`.writeDataBE(`field`.addr, `write`)
+        )
     else:
       #[
       if tmpVar == nil:
