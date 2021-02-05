@@ -373,6 +373,7 @@ proc createWriteStatement(
     if size == 0:
       result = (quote do:
         `stream`.write(`field`)
+        `stream`.write(0'u8)
       )
     else:
       let fieldName = field.toStrLit
@@ -475,6 +476,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
     writeOffset: BiggestInt = 0
     seenFields = newSeq[string]()
     extraParams = newSeq[NimNode]()
+    skipMagicReader = false
   while i < paramsAndDef.len - 1:
     let p = paramsAndDef[i]
     if p.kind != nnkExprColonExpr:
@@ -520,14 +522,17 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
           tupleMeat.add(nnkIdentDefs.newTree(resfield, kind, newEmptyNode()))
         if $info.kind == "string":
           info.size = ($magic).len
-        inner.add(createReadStatement(sym, info, readOffset, stream))
+        if not skipMagicReader:
+          inner.add(createReadStatement(sym, info, readOffset, stream))
+          inner.add(quote do:
+            if `sym` != `magic`:
+              raise newException(MagicError,
+                "Magic with size " & $`size` &
+                " didn't match value " & $`magic` & ", read: " & $`sym`)
+          )
+        else:
+          skipMagicReader = false
         writer.add(createWriteStatement(writeSym, info, writeOffset, stream))
-        inner.add(quote do:
-          if `sym` != `magic`:
-            raise newException(MagicError,
-              "Magic with size " & $`size` &
-              " didn't match value " & $`magic` & ", read: " & $`sym`)
-        )
       of nnkBracketExpr:
         let
           sym = def[1][0][0]
@@ -655,7 +660,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
                   inc `iiRead`
                 `stream`.setPosition(`stream`.getPosition()+sizeof(`endKind`))
               )
-              inc i
+              skipMagicReader = true
             else:
               inner.add(quote do:
                 while `stream`.peekStr(len(`magic`)) != `magic`:
@@ -727,7 +732,7 @@ macro createParser*(name: untyped, paramsAndDef: varargs[untyped]): untyped =
       else:
         discard
     when defined(binaryparseLog):
-      # This can be used for debugging, should possibly be exposed by a flag
+      # This can be used for debugging
       inner.add(quote do:
         when `field` >= 0:
           echo "Done reading field " & $`i` & ": " & $`res`[`field`]
