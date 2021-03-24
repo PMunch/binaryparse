@@ -140,21 +140,21 @@ template readDataLE*(stream: Stream, buffer: pointer, size: int) =
 
 template peekDataBE*(stream: Stream, buffer: pointer, size: int) =
   let startPos = stream.getPosition()
-  defer: stream.setPosition(startPos)
   for i in 0..<size:
     let tmp = cast[pointer](cast[int](buffer) + ((size-1)-i))
     if stream.readData(tmp, 1) != 1:
       raise newException(IOError,
         "Unable to peek the requested amount of bytes from file")
+  stream.setPosition(startPos)
 
 template peekDataLE*(stream: Stream, buffer: pointer, size: int) =
   let startPos = stream.getPosition()
-  defer: stream.setPosition(startPos)
   for i in 0..<size:
     let tmp = cast[pointer](cast[int](buffer) + i)
     if stream.readData(tmp, 1) != 1:
       raise newException(IOError,
         "Unable to peek the requested amount of bytes from file")
+  stream.setPosition(startPos)
 
 proc replace(node: var NimNode, seenFields: seq[string], parent: NimNode) =
   if node.kind == nnkIdent:
